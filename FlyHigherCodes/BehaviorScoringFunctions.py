@@ -541,4 +541,4 @@ def report_final_summary(time_scoring: str,
     return "\n".join(lines)
 
 
-def done_duck(): return "\n".join([""]*3 + [f"{' '*7}   __(.)<", f"{' '*7}O  \\_) )"])
+def done_duck(i=15):return f"""\n\n\n{' '*(i+9)}__(·)<    ,\n{' '*(i+6)}O  \\_) )   c|_|\n{' '*i}{'~'*27}"""
