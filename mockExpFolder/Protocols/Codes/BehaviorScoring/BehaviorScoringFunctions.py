@@ -1,0 +1,544 @@
+"""
+BehaviorScoringFunctions.py
+
+This module provides utility functions that support the Drosophila defensive behavior analysis pipeline.
+It includes functions to:
+    - Load and interact with experimental folder paths.
+    - Preprocess and validate raw data files (e.g., alignment corrections, checking file processing status).
+    - Transform data (e.g., filling gaps, cleaning binary columns, speed and orientation calculations).
+    - Classify behaviors at various analysis layers (hierarchical, sustained, transient, and resistant behaviors).
+    
+These functions are designed to modularize the data processing, ensuring clear and efficient transformation 
+of raw experimental data into a structured format for further analysis.
+"""
+
+import os
+import numpy as np
+import pandas as pd
+import tkinter as tk
+from tkinter import filedialog
+
+
+CHECKPOINT_ERRORS = {
+    'ERROR_READING_FILE': {
+        'message': 'Error reading tracked file.',
+        'file_end': 'error_reading.csv'
+    },
+    'WRONG_LOOM_COUNT': {
+        'message': 'Wrong loom count detected.',
+        'file_end': 'wrong_stim_count.csv'
+    },
+    'WRONG_STIMULUS_DURATION': {
+        'message': 'Wrong loom duration detected.',
+        'file_end': 'wrong_stim_duration.csv'
+    },
+    'LOST_CENTROID_POSITION': {
+        'message': 'Too many centroid NaNs detected.',
+        'file_end': 'many_nans.csv'
+    },
+    'POSE_MISMATCH': {
+        'message': 'Mismatch between tracked and pose data lengths.',
+        'file_end': 'no_match_pose.csv'
+    },
+    'MISSING_POSE_FILE': {
+        'message': 'Pose file is missing.',
+        'file_end': 'missing_pose.csv'
+    },
+    'VIEW_NAN_EXCEEDED': {
+        'message': 'Too many NaNs in view data.',
+        'file_end': 'view_nan_exceeded.csv'
+    },
+    'UNASSIGNED_BEHAVIOR': {
+        'message': 'Too many unassigned behaviors detected.',
+        'file_end': 'unassigned_behaviors.csv'
+    },
+    'NO_EXPLORATION': {
+        'message': 'Insufficient exploration during baseline period.',
+        'file_end': 'too_little_exploration.csv'
+    },
+    'OUTPUT_LEN_SHORT': {
+        'message': 'Tracked file length is shorter than expected.',
+        'file_end': 'tracked_len_short.csv'
+    }
+}
+
+
+def checkpoint_fail(df, filename_tracked: str, error_key: str, error_counter: int, error_dir: str) -> int:
+    """
+    Handle a failed checkpoint by:
+      1. Writing `df` out to the error directory with the appropriate suffix.
+      2. Printing a standardized error line.
+      3. Incrementing and returning the associated counter.
+
+    Parameters:
+        df:               DataFrame to save (tracked_df or transform_df).
+        filename_tracked: Original filename (e.g. "trial_005_tracked.csv").
+        error_key:        Key in CHECKPOINT_ERRORS (e.g. 'NO_EXPLORATION').
+        error_counter:    Current value of that error’s counter.
+        error_dir:        Full path to the error folder (PATHconfig.pError).
+
+    Returns:
+        int: error_counter + 1
+    """
+    info = CHECKPOINT_ERRORS[error_key]
+    error_file = filename_tracked.replace('tracked.csv', info['file_end'])
+    df.to_csv(os.path.join(error_dir, error_file), header=True)
+
+    # Print the error line using the same formatter
+    print(report_error_line(info['message']))
+
+    return error_counter + 1
+
+
+def load_path():
+    """
+    Load the experimental folder path.
+    
+    Returns:
+        str: The selected experimental folder path.
+    """
+    # Initialize and configure the Tkinter window for the file dialog
+    root = tk.Tk()
+    root.attributes('-topmost', True)
+    root.withdraw()
+    
+    # Open the file dialog for folder selection
+    foldername = filedialog.askdirectory(parent=root, title='Choose experimental folder to load files')
+    
+    # Clean up the Tkinter instance
+    root.destroy()
+    return foldername
+
+
+def is_file_already_processed(filename_tracked, group_name, pose_scoring, processed_counters, PATHconfig):
+    """
+    Determine if a tracked file has already been processed or marked with an error.
+    
+    Parameters:
+        filename_tracked (str): Name of the tracked file.
+        group_name (str): Name of the output group folder.
+        pose_scoring (bool): Flag indicating if pose scoring is enabled.
+        processed_counters (dict): Dictionary with keys 'scored' and 'error' to track processed files.
+        PATHconfig (str): PATHconfig module.
+    
+    Returns:
+        bool: True if the file is already processed or labeled as an error, False otherwise.
+    """
+    # Determine the output folder and expected scored file name based on pose scoring
+    if pose_scoring:
+        scored_folder = os.path.join(PATHconfig.pScoredPose, group_name)
+        scored_file = filename_tracked.replace('tracked.csv', 'scored_pose.csv')
+    else:
+        scored_folder = os.path.join(PATHconfig.pScored, group_name)
+        scored_file = filename_tracked.replace('tracked.csv', 'scored.csv')
+    
+    # Check if the scored file already exists
+    if scored_file in os.listdir(scored_folder):
+        processed_counters['scored'] += 1
+        return True
+
+    # Check for any error file labels in the corresponding error folder
+    error_folder = os.path.join(PATHconfig.pError, group_name)
+    for error_key, error_info in CHECKPOINT_ERRORS.items():
+        error_file = filename_tracked.replace('tracked.csv', error_info['file_end'])
+        if error_file in os.listdir(error_folder):
+            processed_counters['error'] += 1
+            return True
+
+    return False
+
+
+def fill_zeros(df, column, max_length):
+    """
+    Fill gaps in a binary column by setting isolated zeros to one when adjacent to ones.
+    
+    Parameters:
+        df (DataFrame): The input data.
+        column (str): The column name to be processed.
+        max_length (int): Maximum number of zeros to fill in a sequence.
+    
+    Returns:
+        None: The DataFrame is modified in place.
+    """
+    x = df[column].to_numpy()
+    n = len(x)
+    
+    # Loop through the array and fill zeros in sequences of ones
+    for i in range(n - max_length - 1):
+        if x[i] == 1 and x[i + 1] == 0:
+            if x[i + 1: i + max_length + 1].sum() > 0:
+                x[i + 1] = 1
+    df[column] = x
+
+
+def clean_ones(df, column, min_length):
+    """
+    Clean isolated ones in a binary column by setting them to zero if their duration is below a threshold.
+    
+    Parameters:
+        df (DataFrame): The input data.
+        column (str): The column name to be processed.
+        min_length (int): Minimum required consecutive ones to retain them.
+    
+    Returns:
+        None: The DataFrame is modified in place.
+    """
+    x = df[column].to_numpy()
+    n = len(x)
+    
+    # Loop through the array and clean isolated ones based on min_length criteria
+    for i in range(n - min_length - 1):
+        if x[i] == 0 and x[i + 1] == 1:
+            if x[i + 1: i + 1 + min_length + 1].sum() < 3:
+                x[i + 1] = 0
+    df[column] = x
+
+
+def bout_duration(df, column):
+    """
+    Count the durations (in frames) of each continuous bout of 1's in a binary column.
+
+    Parameters:
+        df (DataFrame): Input data frame.
+        column (str): Binary column to analyze.
+
+    Returns:
+        List[int]: Frame-lengths of each detected bout of 1's.
+    """
+    x = df[column].to_numpy()
+    durations = []
+    count = 0
+
+    for val in x:
+        if val == 1:
+            count += 1
+        elif count > 0:
+            durations.append(count)
+            count = 0
+
+    # capture any ongoing bout at end
+    if count > 0:
+        durations.append(count)
+
+    return durations
+
+
+def calculate_speed(column_x, column_y, frame_span_sec):
+    """
+    Calculate the speed of a fly based on x and y coordinate differences.
+    
+    Parameters:
+        column_x (Series): Series of x coordinates.
+        column_y (Series): Series of y coordinates.
+        frame_span_sec (float): Duration of a single frame.
+    
+    Returns:
+        Series: Calculated speeds rounded to two decimal places.
+    """
+    # Compute coordinate differences
+    diff_x = column_x.diff()
+    diff_y = column_y.diff()
+    
+    # Calculate Euclidean distance and derive speed
+    distance = np.sqrt(diff_x**2 + diff_y**2)
+    speed = distance / frame_span_sec
+    return round(speed, 2)
+
+
+def determine_view(row):
+    """
+    Determine the view and corresponding position based on row confidence values.
+    
+    When all three key positions (Head, Thorax, and Abdomen) are available, the view is chosen
+    based on the highest confidence value among 'Left', 'Right', and 'Top'.
+    
+    For vertical classification (when not all three key positions are available):
+      - If at least one of Head or Abdomen coordinates is available (Thorax is optional):
+          - If both Head and Abdomen are provided, use the Head coordinate.
+          - If only Head is available, use it.
+          - If only Abdomen is available, use it.
+      - If neither Head nor Abdomen is available (or only the Thorax is provided),
+        then the view and coordinates will be set to NaN.
+    
+    Parameters:
+        row (Series): A row from a DataFrame containing position and confidence data.
+    
+    Returns:
+        tuple: (selected_view (str or NaN), view_x (float), view_y (float))
+    """
+    # If full key positional data is available, select the view based on the confidence values
+    if pd.notna(row.get('Head.Position.X')) and pd.notna(row.get('Thorax.Position.X')) and pd.notna(row.get('Abdomen.Position.X')):
+        confidences = {
+            'Left': row.get('Left.Confidence', 0),
+            'Right': row.get('Right.Confidence', 0),
+            'Top': row.get('Top.Confidence', 0)
+        }
+        selected_view = max(confidences, key=confidences.get)
+        view_x = row.get(f'{selected_view}.Position.X', np.nan)
+        view_y = row.get(f'{selected_view}.Position.Y', np.nan)
+    else:
+        # Apply new vertical classification:
+        # Check if at least one of Head or Abdomen coordinates is present.
+        if pd.notna(row.get('Head.Position.X')) or pd.notna(row.get('Abdomen.Position.X')):
+            selected_view = 'Vertical'
+            # If Head is present, use it; otherwise use Abdomen.
+            if pd.notna(row.get('Head.Position.X')):
+                view_x = row.get('Head.Position.X', np.nan)
+                view_y = row.get('Head.Position.Y', np.nan)
+            else:
+                view_x = row.get('Abdomen.Position.X', np.nan)
+                view_y = row.get('Abdomen.Position.Y', np.nan)
+        else:
+            # No valid coordinates for vertical (or only Thorax is available)
+            selected_view = np.nan
+            view_x = np.nan
+            view_y = np.nan
+
+    return selected_view, view_x, view_y
+
+
+def calculate_orientation(pointA_x, pointA_y, pointB_x, pointB_y):
+    """
+    Calculate the orientation of a fly between two points.
+
+    Parameters:
+        pointA_x (float): x coordinate of the first point.
+        pointA_y (float): y coordinate of the first point.
+        pointB_x (float): x coordinate of the second point.
+        pointB_y (float): y coordinate of the second point.
+
+    Returns:
+        float: Orientation in degrees (0-360), where 0 corresponds to North.
+    """
+    # Calculate differences in coordinates
+    dx = pointB_x - pointA_x
+    dy = pointA_y - pointB_y
+
+    # Compute angle in radians and convert to degrees
+    orientation = np.arctan2(dy, dx)
+    orientation_degrees = np.degrees(orientation)
+
+    # Normalize to [0, 360] and shift by 90 degrees to set 0 as North
+    orientation_degrees = (orientation_degrees + 360) % 360
+    orientation_degrees = (orientation_degrees + 90) % 360
+
+    return np.round(orientation_degrees, 2)
+
+
+def calculate_center_running_average(df, cols, output_cols, window_size):
+    """
+    Calculate the centered running average for specified DataFrame columns.
+
+    Parameters:
+        df (DataFrame): Input data.
+        cols (list): List of column names to average.
+        output_cols (list): Names of the columns to store the averaged results.
+        window_size (int): Window size used for the running average.
+
+    Returns:
+        DataFrame: Modified DataFrame with new averaged columns added.
+    """
+    # Loop through each column and calculate the centered rolling mean
+    for col, output_col in zip(cols, output_cols):
+        df[output_col] = df[col].rolling(window=(window_size + 1), center=True).mean()
+    return df
+
+
+def hierarchical_classifier(df, columns):
+    """
+    Assign a single behavior per frame based on a hierarchical scheme.
+    
+    Parameters:
+        df (DataFrame): Input data.
+        columns (list): Columns representing different behaviors.
+    
+    Returns:
+        DataFrame: Modified DataFrame with only one behavior scored per frame.
+    """
+    # Convert behavior columns to a numpy array and compute cumulative sum row-wise
+    arr = df[columns].to_numpy(copy=True)
+    cumsum = np.cumsum(arr, axis=1)
+    
+    # Zero out all values after the first non-zero entry in each row
+    arr[cumsum > 1] = 0
+    df[columns] = arr
+    return df
+
+
+def classify_layer_behaviors(df, average_columns):
+    """
+    Classify behaviors for each frame by selecting the column with the maximum averaged value.
+    
+    Parameters:
+        df (DataFrame): Input data.
+        average_columns (list): Columns containing averaged behavior data.
+    
+    Returns:
+        list: Selected behavior for each frame (column name or NaN if none is above zero).
+    """
+    action_category_list = []
+    
+    # Iterate through each row to determine the behavior with highest value
+    for i in range(len(df)):
+        max_value = -1
+        max_col = np.nan
+        for col in average_columns:
+            if df.loc[i, col] > max_value:
+                max_value = df.loc[i, col]
+                max_col = col
+
+        action_category_list.append(max_col if max_value > 0 else np.nan)
+    
+    return action_category_list
+
+
+def classify_resistant_behaviors(df, RESISTANT_COLUMNS, STARTLE_WINDOW_FRAMES):
+    """
+    Mark resistant bouts: layer‑2 behaviour that (i) overlaps the startle window
+    and (ii) lasts at least MIN_PERSISTENT_DURATION_FRAMES.
+    """
+    for col in RESISTANT_COLUMNS:
+        base = col.replace("resistant_", "")          # map to walk / stationary / freeze
+        layer2 = f"layer2_{base}"
+        df[col] = 0                                   # create output column
+
+        # find onsets / offsets in the layer‑2 binary trace
+        on = df[df[layer2].diff() == 1].index
+        off = df[df[layer2].diff() == -1].index
+        if len(off) < len(on):                        # handle open bout at file end
+            off = np.hstack((off, len(df)))
+
+        # flag bouts that satisfy both duration & overlap criteria
+        for a, b in zip(on, off):
+            overlaps    = df.loc[a:b, "Startle_window"].sum() >= STARTLE_WINDOW_FRAMES
+            if overlaps:
+                df.loc[a:b - 1, col] = 1
+    return df
+
+
+def _format_count_line(label: str, value: str, total_width: int) -> str:
+    """
+    Helper to format:
+      {label}{3 spaces}{hyphens}{3 spaces}{value}
+    so the right-most digit of `value` ends at column `total_width`.
+    """
+    hyphens = total_width - len(label) - 6 - len(value)
+    return f"{label}{' '*3}{'-'*hyphens}{' '*3}{value}"
+
+
+def report_header(experiment_path: str,
+                  pose_scoring: bool,
+                  total_files: int,
+                  to_score: int,
+                  skipped_count: int,
+                  scored_files: int,
+                  error_count: int,
+                  total_width: int = 61) -> str:
+    """
+    Build the opening report block.
+
+    Parameters:
+        experiment_path: the root folder (shown after LOADING:)
+        pose_scoring:     EXPconfig.POSE_SCORING (True/False)
+        total_files:      len(tracked_files)
+        to_score:         len(to_process)
+        skipped_count:    number already processed
+        scored_files:     counter of successes (initially 0)
+        error_count:      counter of errors (initially 0)
+        total_width:      column width for alignment
+    """
+    lines = [
+        f"PROCESSING: {experiment_path}",
+        f"POSE:    {str(pose_scoring).upper()}",
+        "",
+        _format_count_line("FILES FOUND", str(total_files), total_width),
+        _format_count_line("TO SCORE",    str(to_score),    total_width),
+        _format_count_line("SKIPPING",    str(skipped_count),total_width),
+        f"---   scored: {scored_files}   ---   errors: {error_count}   ---",
+        "",
+        ""
+    ]
+    return "\n".join(lines)
+
+
+def report_scoring_line(idx: int,
+                        total_files: int,
+                        delta_s: float,
+                        eta: str,
+                        basename: str) -> str:
+    """
+    Format one file’s progress line.
+
+    Parameters:
+        idx:         1-based index in the to_process list
+        total_files: total number of files
+        delta_s:     how many seconds the *previous* file took
+        eta:         estimated remaining time string (e.g. "02h31")
+        basename:    tracked filename without ".csv" suffix
+    """
+    return (f"SCORING: file {idx}/{total_files} "
+            f"({delta_s:.2f} s/file – {eta} eta)  |  {basename}")
+
+
+def report_error_line(msg: str) -> str:
+    """
+    Format an error for the current file.
+
+    Parameters:
+        msg: the CHECKPOINT_ERRORS[...] message (e.g. "No stimulus found")
+
+    Returns:
+        "---   ERROR: {msg}   ---"
+    """
+    return f"---   ERROR: {msg}   ---\n"
+
+
+def report_final_summary(time_scoring: str,
+                         total_files: int,
+                         scored_files: int,
+                         error_count: int,
+                         error_reading_file: int,
+                         missing_pose_file: int,
+                         wrong_loom_count: int,
+                         wrong_loom_duration: int,
+                         lost_centroid_position: int,
+                         pose_mismatch: int,
+                         view_nan_exceeded: int,
+                         unassigned_behavior: int,
+                         no_exploration: int,
+                         output_len_short: int,
+                         total_width: int = 61) -> str:
+    """
+    Build the concluding summary.
+
+    Parameters:
+        time_scoring:           total run time (e.g. "03h22")
+        total_files:            same as in header
+        scored_files:           number succeeded
+        error_count:            total number errored
+        error_reading_file:     count of files that failed to read
+        missing_pose_file, ...: all other error‐type counters
+    """
+    pct = f"{int(round(error_count / total_files * 100))}%"
+    lines = [
+        _format_count_line("TIME SCORING",       time_scoring,            total_width),
+        "",
+        _format_count_line("FILES FOUND",        str(total_files),        total_width),
+        _format_count_line("FILES SCORED",       str(scored_files),       total_width),
+        "",
+        _format_count_line("ERRORS",             f"{error_count} ({pct})", total_width),
+        _format_count_line("---   error reading file",     str(error_reading_file),     total_width),
+        _format_count_line("---   missing pose file",      str(missing_pose_file),      total_width),
+        _format_count_line("---   wrong stim count",       str(wrong_loom_count),       total_width),
+        _format_count_line("---   wrong stim duration",    str(wrong_loom_duration),    total_width),
+        _format_count_line("---   lost centroid position", str(lost_centroid_position), total_width),
+        _format_count_line("---   pose length mismatch",   str(pose_mismatch),          total_width),
+        _format_count_line("---   many view NaNs",         str(view_nan_exceeded),      total_width),
+        _format_count_line("---   unassigned behavior",    str(unassigned_behavior),    total_width),
+        _format_count_line("---   no exploration",         str(no_exploration),         total_width),
+        _format_count_line("---   tracked file short",     str(output_len_short),       total_width),
+    ]
+    return "\n".join(lines)
+
+
+def done_duck(i=15):return f"""\n\n\n{' '*(i+9)}__(·)<    ,\n{' '*(i+6)}O  \\_) )   c|_|\n{' '*i}{'~'*27}"""
