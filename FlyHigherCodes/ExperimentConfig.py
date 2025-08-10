@@ -1,50 +1,70 @@
-#%% CELL 00 – MODULE OVERVIEW
+#%%% CELL 00 – MODULE OVERVIEW
 """
 ExperimentConfig.py
 
 Purpose
-=======
-Define general experimental settings and metadata for the Drosophila defensive-behaviour analysis toolkit.
-All pipeline stages import this file to access common constants.
+This module defines canonical experiment constants and converts second-based
+timing into integer frame counts. It acts as the single source of truth for
+stimulus, timing, arena, and grouping settings used across the pipeline.
+
+Steps
+- Declare base settings and metadata.
+- Define period specs in seconds.
+- Compute integer frame counts and ranges for each period.
+- Add an 'Experiment' aggregate and export public names.
+
+Output
+- Constants for stimuli, timing, arena, and metadata.
+- EXPERIMENTAL_PERIODS with duration_frames (int) and range_* fields.
+- stimulus_duration_frames (int), frame_span_sec (float),
+  total_duration_frames (int).
 """
 
-#%% CELL 01 – GENERAL EXPERIMENT VARIABLES
+#%%% CELL 01 – GENERAL EXPERIMENT VARIABLES
+"""
+Purpose
+Define base configuration for alignment, stimuli, timing, arena size, filename
+schema, and experimental groups. Keep 'Loom' as the protocol label.
 
-# Enable pose-derived metrics processing
-POSE_SCORING = True  # include pose‑derived metrics from SLEAP
+Steps
+- Set stimulus and timing values.
+- Define periods in seconds.
+- Provide filename schema and experimental groups.
+"""
 
-# Stimulus alignment configuration
-ALIGNMENT_COL         = "VisualStim"  # column holding stimulus pulses (0→1)
-STIMULUS_NUMBER       = 20            # expected onsets per run
-STIMULUS_DURATION_SEC = 0.5           # stimulus length (sec)
-EXPECTED_STIMULUS     = STIMULUS_NUMBER + 3  # extra events (e.g. lights‑off)
+# General switches and alignment
+POSE_SCORING = True  # include pose-derived metrics from SLEAP
+ALIGNMENT_COL = "VisualStim"  # column with stimulus pulses (0→1 edges)
 
+# Stimulus expectations
+STIMULUS_NUMBER = 20                 # expected onsets per run
+STIMULUS_DURATION_SEC = 0.5          # stimulus length (sec)
+EXPECTED_STIMULUS = STIMULUS_NUMBER + 3  # extra events (e.g., lights-off)
 
-# Timing & arena dimensions
-FRAME_RATE      = 60   # frames per second
-ARENA_WIDTH_MM  = 30   # arena width (millimetres)
-ARENA_HEIGHT_MM = 30   # arena height (millimetres)
+# Timing and arena
+FRAME_RATE = 60       # frames per second
+ARENA_WIDTH_MM = 30   # arena width (millimetres)
+ARENA_HEIGHT_MM = 30  # arena height (millimetres)
 
-# Experimental periods durations (sec)
+# Periods (sec)
 EXPERIMENTAL_PERIODS = {
-    "Baseline":    {"duration_sec": 300},
+    "Baseline": {"duration_sec": 300},
     "Stimulation": {"duration_sec": 300},
-    "Recovery":    {"duration_sec": 300},
+    "Recovery": {"duration_sec": 300},
 }
 
 # Filename and grouping metadata
-FILENAME_STRUCTURE = [  # order of fields in scored filenames
-    "Experimenter", "Genotype", "Protocol", "Sex", "Age",
-    "Setup", "Camera", "Date", "FlyID", "Extension",
-]
+FILENAME_STRUCTURE = ["Experimenter", "Genotype", "Protocol", "Sex", "Age",
+                      "Setup", "Camera", "Date", "FlyID", "Extension"]
 
 GROUP_IDENTIFIER = "Protocol"  # metadata field used for grouping runs
 
+# Experimental groups (keep 'Loom' as protocol label)
 EXPERIMENTAL_GROUPS = {
     "Control": {
-        "label": "Control",               # group name
-        "idValue": "20Control_3BlackOut", # identifier in filename metadata
-        "color": "#645769",               # color for plotting
+        "label": "Control",                # group name
+        "idValue": "20Control_3BlackOut",  # identifier in filename metadata
+        "color": "#645769",                # plot color
     },
     "Loom": {
         "label": "Loom",
@@ -53,72 +73,64 @@ EXPERIMENTAL_GROUPS = {
     },
 }
 
-
-#%% CELL 02 - TIMING VARIABLES
-
+#%%% CELL 02 – DERIVED TIMING VARIABLES
 """
-CELL 02: Derived Timing Variables
+Purpose
+Convert second-based inputs into frame-based durations and ranges, and summarize
+totals. All *_frames values are computed once as integers and reused downstream.
 
-This cell calculates and defines various timing-related variables derived from the frame rate and 
-experiment periods. These derived variables include frame spans, total experiment length, 
-and period durations in frames. These variables are crucial for segmenting 
-and aligning data during the analysis.
-
-EXPERIMENTAL_PERIODS = {
-    'PeriodName': {
-        'label': 'Human-readable label',  # Descriptive label for the period
-        'duration_sec': <float>,  # Duration of the period in seconds
-        'duration_frames': <int>,  # Duration of the period in frames
-        'range_sec': (<float>, <float>),  # Tuple indicating the start and end time in seconds
-        'range_frames': (<int>, <int>)  # Tuple indicating the start and end frame numbers
-    },
-    # Additional periods follow the same structure...
-}
+Steps
+- Compute frame_span_sec (float) and stimulus_duration_frames (int).
+- For each period, compute duration_frames and range_frames (ints).
+- Compute totals and add an 'Experiment' aggregate period.
 """
 
-# Derived Timing Variables
-frame_span_sec = 1 / FRAME_RATE  # Duration of a single frame (in seconds)
-stimulus_duration_frames = STIMULUS_DURATION_SEC * FRAME_RATE  # Duration of stimulus (in frames)
+# Derived units
+frame_span_sec = 1 / FRAME_RATE  # duration of a single frame (sec, float)
+stimulus_duration_frames = int(STIMULUS_DURATION_SEC * FRAME_RATE)  # frames (int)
 
-# Initialize variables for cumulative time calculation
-current_time_sec = 0
-current_time_frames = 0
+# Running clocks
+current_time_sec = 0.0   # running clock in seconds (float)
+current_time_frames = 0  # running clock in frames (int)
 
-# Update EXPERIMENTAL_PERIODS dictionary to include duration in frames, range in frames, and range in seconds
-for label, info in EXPERIMENTAL_PERIODS.items():
-    # Calculate duration in frames
-    info['duration_frames'] = info['duration_sec'] * FRAME_RATE
-    
-    # Define the range in seconds
-    info['range_sec'] = (current_time_sec, current_time_sec + info['duration_sec'])
-    
-    # Define the range in frames
-    info['range_frames'] = (current_time_frames, current_time_frames + info['duration_frames'])
-    
-    # Update the cumulative time
-    current_time_sec += info['duration_sec']
-    current_time_frames += info['duration_frames']
+# Compute frame-based fields per period
+for name, info in EXPERIMENTAL_PERIODS.items():
+    dur_sec = info["duration_sec"]                  # seconds (float)
+    dur_frames = int(dur_sec * FRAME_RATE)          # frames (int)
+    info["duration_frames"] = dur_frames
+    info["range_sec"] = (current_time_sec, current_time_sec + dur_sec)
+    info["range_frames"] = (current_time_frames, current_time_frames + dur_frames)
+    current_time_sec += dur_sec
+    current_time_frames += dur_frames
 
-# Calculate the total experiment duration in seconds and frames
+# Totals
 total_duration_sec = current_time_sec
-total_duration_frames = current_time_frames
+total_duration_frames = current_time_frames  # int frames
 
-# Add an 'Experiment' entry to the EXPERIMENTAL_PERIODS dictionary
-EXPERIMENTAL_PERIODS['Experiment'] = {
-    'label': 'Experiment',
-    'duration_sec': total_duration_sec,
-    'duration_frames': total_duration_frames,
-    'range_sec': (0, total_duration_sec),
-    'range_frames': (0, total_duration_frames)
+# Aggregate experiment window
+EXPERIMENTAL_PERIODS["Experiment"] = {
+    "label": "Experiment",
+    "duration_sec": total_duration_sec,
+    "duration_frames": total_duration_frames,
+    "range_sec": (0.0, total_duration_sec),
+    "range_frames": (0, total_duration_frames),
 }
 
+# Read-only advisory: do not mutate EXPERIMENTAL_PERIODS after import
 
-#%% CELL 03 – EXPORTS
+#%%% CELL 03 – EXPORTS
+"""
+Purpose
+Expose configuration symbols for downstream modules.
 
-__all__ = [
-    "POSE_SCORING",
-    "ALIGNMENT_COL", "STIMULUS_NUMBER", "STIMULUS_DURATION_SEC", "EXPECTED_STIMULUS",
-    "FRAME_RATE", "ARENA_WIDTH_MM", "ARENA_HEIGHT_MM",
-    "EXPERIMENTAL_PERIODS",
-    "FILENAME_STRUCTURE", "GROUP_IDENTIFIER", "EXPERIMENTAL_GROUPS",
-]
+Steps
+- List public names in __all__ for 'from ExperimentConfig import *'.
+"""
+
+__all__ = ["POSE_SCORING",
+           "ALIGNMENT_COL", "STIMULUS_NUMBER", "STIMULUS_DURATION_SEC",
+           "EXPECTED_STIMULUS",
+           "FRAME_RATE", "ARENA_WIDTH_MM", "ARENA_HEIGHT_MM",
+           "frame_span_sec", "stimulus_duration_frames",
+           "total_duration_frames", "EXPERIMENTAL_PERIODS",
+           "FILENAME_STRUCTURE", "GROUP_IDENTIFIER", "EXPERIMENTAL_GROUPS"]
