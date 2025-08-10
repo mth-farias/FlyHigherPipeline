@@ -29,7 +29,7 @@ BASELINE_EXPLORATION    = 0.2     # min fraction of walking during baseline
 SCORED_COLUMNS = [  # columns saved in scored CSVs
     "FrameIndex", "VisualStim", "Stim0", "Stim1",
     "Position_X", "Position_Y", "Speed", "Motion",
-    "Layer1", "Layer2",
+    "Layer1", "Layer2", 'Resistant',
     "Behavior",
 ]
 
