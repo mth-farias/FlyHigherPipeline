@@ -94,7 +94,7 @@ pTracked          = pPostProcessing / "Tracked"
 pPose             = pPostProcessing / "Pose"
 pScored           = pPostProcessing / "Scored"
 pScoredPose       = pPostProcessing / "ScoredPose"
-pError           = pPostProcessing / "Error"
+pScoredError           = pPostProcessing / "ScoredError"
 
 # Analysis (subfolders)
 pAnalysis         = _p("Analysis")
@@ -131,7 +131,7 @@ __all__ = [
     # folders
     "pProtocols", "pCodes", "pBehaviorScoring", "pCreateDataFrames", "pConfig",
     "pRawData",
-    "pPostProcessing", "pArenas", "pCropVideo", "pTracked", "pPose", "pScored", "pScoredPose", "pError",
+    "pPostProcessing", "pArenas", "pCropVideo", "pTracked", "pPose", "pScored", "pScoredPose", "pScoredError",
     "pAnalysis", "pDataFrames", "pZoomDataFrames", "pPlots",
     # individual files (shorthands)
     "BSR", "CDFR",

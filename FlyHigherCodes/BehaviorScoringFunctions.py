@@ -15,8 +15,6 @@ of raw experimental data into a structured format for further analysis.
 import os
 import numpy as np
 import pandas as pd
-import tkinter as tk
-from tkinter import filedialog
 
 
 CHECKPOINT_ERRORS = {
@@ -75,39 +73,19 @@ def checkpoint_fail(df, filename_tracked: str, error_key: str, error_counter: in
         filename_tracked: Original filename (e.g. "trial_005_tracked.csv").
         error_key:        Key in CHECKPOINT_ERRORS (e.g. 'NO_EXPLORATION').
         error_counter:    Current value of that error’s counter.
-        error_dir:        Full path to the error folder (PATHconfig.pError).
+        error_dir:        Full path to the error folder (PATHconfig.pScoredError).
 
     Returns:
         int: error_counter + 1
     """
     info = CHECKPOINT_ERRORS[error_key]
     error_file = filename_tracked.replace('tracked.csv', info['file_end'])
-    df.to_csv(os.path.join(error_dir, error_file), header=True)
+    write_csv_atomic(df, os.path.join(error_dir, error_file), header=True, index=False)
 
     # Print the error line using the same formatter
     print(report_error_line(info['message']))
 
     return error_counter + 1
-
-
-def load_path():
-    """
-    Load the experimental folder path.
-    
-    Returns:
-        str: The selected experimental folder path.
-    """
-    # Initialize and configure the Tkinter window for the file dialog
-    root = tk.Tk()
-    root.attributes('-topmost', True)
-    root.withdraw()
-    
-    # Open the file dialog for folder selection
-    foldername = filedialog.askdirectory(parent=root, title='Choose experimental folder to load files')
-    
-    # Clean up the Tkinter instance
-    root.destroy()
-    return foldername
 
 
 def is_file_already_processed(filename_tracked, group_name, pose_scoring, processed_counters, PATHconfig):
@@ -138,7 +116,7 @@ def is_file_already_processed(filename_tracked, group_name, pose_scoring, proces
         return True
 
     # Check for any error file labels in the corresponding error folder
-    error_folder = os.path.join(PATHconfig.pError, group_name)
+    error_folder = os.path.join(PATHconfig.pScoredError, group_name)
     for error_key, error_info in CHECKPOINT_ERRORS.items():
         error_file = filename_tracked.replace('tracked.csv', error_info['file_end'])
         if error_file in os.listdir(error_folder):
@@ -416,6 +394,24 @@ def classify_resistant_behaviors(df, RESISTANT_COLUMNS, STARTLE_WINDOW_FRAMES):
     return df
 
 
+def write_csv_atomic(df: pd.DataFrame, final_path: str, **to_csv_kwargs) -> None:
+    """
+    Write a CSV atomically:
+      - write to <final_path>.tmp
+      - fsync
+      - os.replace(tmp, final)
+    Safe across crashes and won't be misread as a completed file mid-write.
+    """
+    tmp_path = final_path + ".tmp"
+    # write tmp
+    df.to_csv(tmp_path, **to_csv_kwargs)
+    # ensure data hits disk
+    with open(tmp_path, "rb") as _f:
+        os.fsync(_f.fileno())
+    # atomic rename
+    os.replace(tmp_path, final_path)
+    
+
 def _format_count_line(label: str, value: str, total_width: int) -> str:
     """
     Helper to format:
@@ -541,4 +537,4 @@ def report_final_summary(time_scoring: str,
     return "\n".join(lines)
 
 
-def done_duck(i=15):return f"""\n\n\n{' '*(i+9)}__(·)<    ,\n{' '*(i+6)}O  \\_) )   c|_|\n{' '*i}{'~'*27}"""
+def done_duck(i=17):return f"""\n\n\n{' '*(i+9)}__(·)<    ,\n{' '*(i+6)}O  \\_) )   c|_|\n{' '*i}{'~'*27}"""

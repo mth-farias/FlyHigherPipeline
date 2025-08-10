@@ -89,8 +89,8 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
       - 'Pose': Contains corresponding pose data files (if POSE_SCORING is enabled).
       
     Depending on the POSE_SCORING flag, create the following output directories under the selected folder:
-      - If POSE_SCORING is True: 'ScoredPose', 'Scored', 'Error'
-      - Otherwise: 'Scored', 'Error'
+      - If POSE_SCORING is True: 'ScoredPose', 'Scored', 'ScoredError'
+      - Otherwise: 'Scored', 'ScoredError'
       
     These directories store the processed/scored data and error logs.
     """
@@ -104,9 +104,9 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
     
     # Determine and create required output folders based on POSE_SCORING flag
     if EXPconfig.POSE_SCORING:
-        output_folders = ['ScoredPose', 'Scored', 'Error']
+        output_folders = ['ScoredPose', 'Scored', 'ScoredError']
     else:
-        output_folders = ['Scored', 'Error']
+        output_folders = ['Scored', 'ScoredError']
     
     for folder in output_folders:
         os.makedirs(os.path.join(PATH, folder), exist_ok=True)
@@ -194,7 +194,7 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
             tracked_df = pd.read_csv(tracked_file_path)
         except Exception:
             error_reading_file = BSF.checkpoint_fail(pd.DataFrame(), filename_tracked, 'ERROR_READING_FILE',
-                                                     error_reading_file, PATHconfig.pError)
+                                                     error_reading_file, PATHconfig.pScoredError)
             continue
 
 
@@ -207,7 +207,7 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
         stim_indices = tracked_df.index[tracked_df[EXPconfig.ALIGNMENT_COL].diff() > 0].tolist()
         if not stim_indices or len(stim_indices) != EXPconfig.EXPECTED_STIMULUS:
             wrong_stim_count = BSF.checkpoint_fail(tracked_df, filename_tracked, 'WRONG_LOOM_COUNT',
-                                                   wrong_stim_count, PATHconfig.pError)
+                                                   wrong_stim_count, PATHconfig.pScoredError)
             continue
         
         
@@ -216,7 +216,7 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
         durations = BSF.bout_duration(tracked_df, EXPconfig.ALIGNMENT_COL)
         if any(abs(d - expected_duration_frames) > BSconfig.NOISE_TOLERANCE for d in durations):
             wrong_stim_duration = BSF.checkpoint_fail(tracked_df, filename_tracked, 'WRONG_STIMULUS_DURATION',
-                                                      wrong_stim_duration, PATHconfig.pError)
+                                                      wrong_stim_duration, PATHconfig.pScoredError)
             continue
         
 
@@ -227,7 +227,7 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
         pos_nan_count = tracked_df['NormalizedCentroidX'].isna().sum()
         if pos_nan_count > (NUMBER_FRAMES * BSconfig.NAN_TOLERANCE):
             lost_centroid_position = BSF.checkpoint_fail(tracked_df, filename_tracked, 'LOST_CENTROID_POSITION',
-                                                         lost_centroid_position, PATHconfig.pError)
+                                                         lost_centroid_position, PATHconfig.pScoredError)
             continue
 
 
@@ -279,12 +279,12 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
         
         Steps:
           - Construct the pose file name by replacing 'tracked.csv' with 'pose.csv'.
-          - Validate that the pose file exists. If not, save the tracked data to the Error folder,
+          - Validate that the pose file exists. If not, save the tracked data to the ScoredError folder,
             increment the missing_pose_file counter, print an error, and skip the file.
           - Load the pose data using pandas (with comma as the separator).
           - Temporarily drop bottom points from the pose data.
           - Validate that the tracked data length matches (pose data length - 1). If not,
-            save the tracked data to the Error folder, increment the pose_mismatch counter,
+            save the tracked data to the ScoredError folder, increment the pose_mismatch counter,
             print an error, and skip the file.
         """
         
@@ -295,7 +295,7 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
             # Validate that the pose file exists
             if not os.path.exists(pose_file_path):
                 missing_pose_file = BSF.checkpoint_fail(tracked_df, filename_tracked, 'MISSING_POSE_FILE',
-                                                        missing_pose_file, PATHconfig.pError)
+                                                        missing_pose_file, PATHconfig.pScoredError)
                 continue
     
             # Load pose data
@@ -304,7 +304,7 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
             # Validate length match between tracked and pose
             if len(tracked_df) != len(pose_df) - 1:
                 pose_mismatch = BSF.checkpoint_fail(tracked_df, filename_tracked, 'POSE_MISMATCH',
-                                                    pose_mismatch, PATHconfig.pError)
+                                                    pose_mismatch, PATHconfig.pScoredError)
                 continue
 
 
@@ -350,7 +350,7 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
             # QC: too many NaNs in view?
             if pose_df['View_X'].isna().sum() > NUMBER_FRAMES * BSconfig.POSE_TRACKING_TOLERANCE:
                 view_nan_exceeded = BSF.checkpoint_fail(tracked_df, filename_tracked, 'VIEW_NAN_EXCEEDED', 
-                                                        view_nan_exceeded, PATHconfig.pError)
+                                                        view_nan_exceeded, PATHconfig.pScoredError)
                 continue
         
             # Convert to millimetres
@@ -402,7 +402,7 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
         total_unassigned_behaviors = transform_df['Layer1'].isna().sum()
         if total_unassigned_behaviors > (NUMBER_FRAMES * BSconfig.LAYER1_TOLERANCE):
             unassigned_behavior = BSF.checkpoint_fail(tracked_df, filename_tracked, 'UNASSIGNED_BEHAVIOR',
-                                                      unassigned_behavior, PATHconfig.pError)
+                                                      unassigned_behavior, PATHconfig.pScoredError)
             continue
 
 
@@ -472,7 +472,7 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
 
         if walk_count_baseline < BSconfig.BASELINE_EXPLORATION * EXPconfig.EXPERIMENTAL_PERIODS['Baseline']['duration_frames']:
             no_exploration = BSF.checkpoint_fail(transform_df, filename_tracked, 'NO_EXPLORATION',
-                                                 no_exploration, PATHconfig.pError)
+                                                 no_exploration, PATHconfig.pScoredError)
             continue
 
     
@@ -575,14 +575,14 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
         expected_len = EXPconfig.EXPERIMENTAL_PERIODS['Experiment']['duration_frames']
         if len(aligned_output_df) != expected_len:
             output_len_short = BSF.checkpoint_fail(aligned_output_df, filename_tracked, 'OUTPUT_LEN_SHORT', 
-                                                   output_len_short, PATHconfig.pError)
+                                                   output_len_short, PATHconfig.pScoredError)
             continue
     
         # Now save the scored file
         scored_file   = filename_tracked.replace('tracked.csv', 'scored.csv')
         scored_folder = os.path.join(PATHconfig.pScored)
         os.makedirs(scored_folder, exist_ok=True)
-        aligned_output_df.to_csv(os.path.join(scored_folder, scored_file), header=True, index=False)
+        BSF.write_csv_atomic(aligned_output_df, os.path.join(scored_folder, scored_file), header=True, index=False)
         
         # Additionally output the pose-scored file if POSE_SCORING is enabled
         if EXPconfig.POSE_SCORING:
@@ -595,7 +595,7 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
             scored_pose_file   = filename_tracked.replace('tracked.csv', 'scored_pose.csv')
             scored_pose_folder = os.path.join(PATHconfig.pScoredPose)
             os.makedirs(scored_pose_folder, exist_ok=True)
-            aligned_output_pose_df.to_csv(os.path.join(scored_pose_folder, scored_pose_file), header=True, index=False)
+            BSF.write_csv_atomic(aligned_output_pose_df, os.path.join(scored_pose_folder, scored_pose_file), header=True, index=False)
     
         scored_files += 1
 
