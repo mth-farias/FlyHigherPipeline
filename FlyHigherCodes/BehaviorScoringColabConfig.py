@@ -261,6 +261,100 @@ def _copy_selected(src: Path, dst: Path, rel_files: List[str]) -> int:
             copied += 1
     return copied
 
+
+#%%% CELL 04A – FORMAT CONSTANTS & HELPERS
+"""
+Purpose
+Provide shared formatting helpers for consistent console output:
+- Banners at 75 chars
+- Content rows at 72 chars with 2-space indent
+- Dash-fill that starts 2 spaces after the longest label in the block and
+  ends 2 spaces before the value
+- Lettered duration formatting (MMmSSs or HHhMMm)
+- Center truncation for long values
+"""
+
+# Shared constants & rules (for implementation)
+BANNER_WIDTH = 75
+CONTENT_WIDTH = 72
+INDENT = "  "         # two spaces
+VALUE_SEP = "  "      # two spaces before/after value groups & '---'
+
+# Progress bar constants (not used in this cell, here for global consistency)
+BAR_TOTAL = 28        # includes brackets
+BAR_LEFT = "["
+BAR_RIGHT = "]"
+BAR_FILL = "#"
+BAR_EMPTY = "."
+
+def _banner(title: str) -> str:
+    t = title.strip().upper()
+    pad = max(BANNER_WIDTH - len(t) - 2, 0)
+    left = pad // 2
+    right = pad - left
+    return "=" * left + " " + t + " " + "=" * right
+
+def _truncate_center(s: str, max_len: int) -> str:
+    s = str(s)
+    if len(s) <= max_len:
+        return s
+    if max_len <= 3:
+        return s[:max_len]
+    keep_left = (max_len - 3) // 2
+    keep_right = max_len - 3 - keep_left
+    return s[:keep_left] + "..." + s[-keep_right:]
+
+def _fmt_duration_lettered(seconds: float) -> str:
+    """
+    Return lettered duration:
+      - < 1h  -> 'MMmSSs'
+      - >=1h  -> 'HHhMMm'
+    Seconds are rounded to nearest second; minutes are rounded from the seconds.
+    """
+    s = int(round(max(seconds, 0)))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h > 0:
+        # Round minutes from seconds (>=30s -> +1m)
+        if sec >= 30:
+            m = (m + 1) % 60
+            if m == 0:
+                h += 1
+        return f"{h:02d}h{m:02d}m"
+    return f"{m:02d}m{sec:02d}s"
+
+def _kv_line(label: str, value: str, longest_label: int) -> str:
+    """
+    Build a single content row (72 chars total):
+      '␣␣' + label + gap + dashes + '␣␣' + value
+    where
+      gap = (longest_label - len(label)) + 2  # 2 spaces after longest label
+    and the dash-fill ends 2 spaces before the value.
+    If value overflows, it's center-truncated to fit exactly 72 cols.
+    """
+    label = str(label)
+    value = str(value)
+
+    # Left part: indent + label + gap to align dash start
+    left = INDENT + label
+    gap = (max(longest_label - len(label), 0) + 2)
+    left += " " * gap
+
+    # Compute max space for value (2 spaces reserved before value)
+    max_value_len = CONTENT_WIDTH - len(left) - 2
+    v = _truncate_center(value, max_value_len)
+
+    # Dash-fill length so the final line ends exactly at CONTENT_WIDTH
+    dash_len = CONTENT_WIDTH - len(left) - 2 - len(v)
+    if dash_len < 0:
+        # (Shouldn't happen because we truncated v, but guard anyway)
+        v = _truncate_center(v, max_value_len + dash_len)
+        dash_len = max(CONTENT_WIDTH - len(left) - 2 - len(v), 0)
+
+    return left + ("-" * dash_len) + "  " + v
+
+
+
 #%%% CELL 05 – PLACEHOLDERS & WARMUP
 """
 Purpose
@@ -362,29 +456,49 @@ def _warmup_measure_speed_mbps(
 #%%% CELL 06 – STAGING (ETA, PLACEHOLDERS, INPUT COPY)
 """
 Purpose
-Stage inputs into local mirrors, print an ETA based on a brief warm-up, create
+Stage inputs into local mirrors, print a *fast* ETA immediately, create
 placeholders for existing outputs, and return a concise summary.
 
-Steps
-- Detect which inputs still need copying and estimate time.
-- Copy only pending inputs; touch placeholders for skipped items.
-- Mirror placeholders for existing outputs (Scored, Error).
-- Return StageSummary (no scoredpose entry).
+Key change
+- Print 'Estimated import' ASAP using a quick speed (cached or default),
+  *before* the warm-up measurement or any other staging work.
+
+Formatting
+- Banners: 75 chars
+- Content rows: 72 chars (start at 2 spaces, end at col 72)
+- Dash-fill starts 2 spaces after the longest label in the block and ends
+  2 spaces before the value
+- 'Estimated import' uses lettered duration; 'RUN STARTED AT' is HH:MM:SS
 """
+
+from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except Exception:
+    ZoneInfo = None
+
+# cache last measured speed across calls in this process
+try:
+    _LAST_MEASURED_SPEED_MBPS
+except NameError:
+    _LAST_MEASURED_SPEED_MBPS = None
 
 def stage_to_local(
     drive_paths: DrivePaths,
     local_paths: LocalPaths,
     pose_scoring: Optional[bool] = None,
     *,
-    verbose: bool = True
+    verbose: bool = True,
+    prior_speed_mbps: Optional[float] = None,  # NEW: optional quick speed hint
 ) -> StageSummary:
     """Stage inputs selectively and mirror existing outputs as placeholders."""
     # Auto-detect pose_scoring if not given
     if pose_scoring is None:
         pose_scoring = drive_paths.pose.exists() and any(drive_paths.pose.rglob("*.csv"))
 
-    print("================= LOADING FILES FROM DRIVE =================")
+    # ---- BANNER: LOADING ----
+    print(_banner("LOADING FILES FROM DRIVE"))
+    print()
 
     # Gather all candidate inputs
     tracked_files = _list_csvs(drive_paths.tracked)
@@ -412,7 +526,20 @@ def stage_to_local(
             if (drive_paths.pose / pose_rel).exists():
                 to_copy_pose.append(pose_rel)
 
-    # Estimate ETA for the files we will actually copy
+    # ---- TOP BLOCK: SOURCE + START TIME ----
+    if ZoneInfo is not None:
+        run_started_at = datetime.now(ZoneInfo("Europe/Lisbon")).strftime("%H:%M:%S")
+    else:
+        run_started_at = datetime.now().strftime("%H:%M:%S")
+
+    block1_labels = ["SOURCE DRIVE PATH", "RUN STARTED AT"]
+    L1 = max(len(x) for x in block1_labels)
+    print(_kv_line("SOURCE DRIVE PATH", str(drive_paths.root), L1))
+    print(_kv_line("RUN STARTED AT", run_started_at, L1))
+    print()
+
+    # ---- QUICK ESTIMATE (print ASAP) ----
+    # Count files & bytes we plan to copy
     est_files_to_copy = len(to_copy_tracked) + len(to_copy_pose)
     total_input_files = total_tracked + total_pose
 
@@ -422,7 +549,7 @@ def stage_to_local(
         try:
             total_bytes += f.stat().st_size
         except OSError:
-            pass  # some files may be transient on the mount
+            pass
     for rel in to_copy_pose:
         f = drive_paths.pose / rel
         try:
@@ -430,26 +557,42 @@ def stage_to_local(
         except OSError:
             pass
 
-    # Adaptive warm-up over the actual to-copy list: 5–10 s and/or ≥100 MB
-    speed_mbps = _warmup_measure_speed_mbps(
+    # Choose a quick speed: caller hint > cached > conservative default (2.6 MB/s)
+    DEFAULT_SPEED_MBPS = 2.6
+    quick_speed = (
+        prior_speed_mbps
+        if (prior_speed_mbps and prior_speed_mbps > 0)
+        else (_LAST_MEASURED_SPEED_MBPS if _LAST_MEASURED_SPEED_MBPS else DEFAULT_SPEED_MBPS)
+    )
+
+    # Compose and PRINT the estimate line immediately
+    block2_labels = ["Estimated import", "Loaded", "Skipped", "Loading time"]
+    L2 = max(len(x) for x in block2_labels)
+
+    if est_files_to_copy > 0 and total_bytes > 0:
+        est_seconds_quick = (total_bytes / (1024 * 1024)) / max(quick_speed, 0.1)
+        est_value_quick = (
+            f"~{_fmt_duration_lettered(est_seconds_quick)} at {quick_speed:.1f} MB/s "
+            f"for {est_files_to_copy}/{total_input_files} files"
+        )
+    else:
+        est_value_quick = "No new input files to copy"
+    print(_kv_line("Estimated import", est_value_quick, L2))
+
+    # ---- OPTIONAL WARM-UP (refine speed internally; no need to reprint estimate) ----
+    measured_speed_mbps = _warmup_measure_speed_mbps(
         drive_paths,
         to_copy_tracked=to_copy_tracked,
         to_copy_pose=to_copy_pose,
         min_seconds=5.0,
         min_megabytes=100.0,
         max_seconds=10.0,
-    ) or 12.0  # conservative fallback if measurement failed
+    )
+    if measured_speed_mbps:
+        # cache for future calls in this kernel
+        globals()["_LAST_MEASURED_SPEED_MBPS"] = measured_speed_mbps
 
-    if est_files_to_copy > 0 and total_bytes > 0:
-        est_seconds = (total_bytes / (1024 * 1024)) / max(speed_mbps, 0.1)
-        print(
-            f"\n   Estimated: ~{_fmt_seconds(est_seconds)} at {speed_mbps:.1f} MB/s "
-            f"for {est_files_to_copy}/{total_input_files} files"
-        )
-    else:
-        print("\n   Estimated: No new input files to copy")
-
-    # Perform staging
+    # ---- Perform staging ----
     t0 = time.perf_counter()
 
     # Inputs (copy only unprocessed)
@@ -482,15 +625,26 @@ def stage_to_local(
         _ = _mirror_placeholders(drive_paths.scoredpose, local_paths.scoredpose, patterns=("*.csv",))
     n_error = _mirror_placeholders(drive_paths.error, local_paths.error, patterns=None)
 
+    # ---- Print Loaded / Skipped / Loading time ----
     if verbose:
         t1 = time.perf_counter()
-        print(f"\n   Inputs        : Tracked={n_tracked}"
-              f"{', Pose=' + str(n_pose) if pose_scoring else ''}")
-        print(f"   Existing outs : Scored={n_scored}, ScoredError={n_error}")
-        print(f"   Staging time  : {_fmt_seconds(t1 - t0)}")
-        print("\n======================= READY TO RUN =======================")
+        loaded_value  = f"tracked: {n_tracked}{VALUE_SEP}---{VALUE_SEP}pose: {n_pose}"
+        skipped_value = f"scored: {n_scored}{VALUE_SEP}---{VALUE_SEP}errors: {n_error}"
+        loading_time_value = _fmt_duration_lettered(t1 - t0)
+
+        print()
+        print(_kv_line("Loaded", loaded_value, L2))
+        print(_kv_line("Skipped", skipped_value, L2))
+        print(_kv_line("Loading time", loading_time_value, L2))
+        print()
+        print(_banner("READY TO RUN"))
+        print()
 
     return StageSummary(tracked=n_tracked, pose=n_pose, scored=n_scored, error_items=n_error)
+
+
+
+
 
 #%%% CELL 07 – LOCAL PATHCONFIG REBASE
 """
@@ -564,26 +718,52 @@ def make_local_pathconfig(PathConfig, local_paths: LocalPaths):
 """
 Purpose
 Copy outputs from local → Drive in bulk, skipping placeholders and avoiding
-overwrites when running in upload mode.
+overwrites when running in upload mode. Then print the final 75/72-formatted
+banner with the destination path and timing breakdown — **only if scoring
+completed** (we consider it completed when a positive 'scoring_seconds' is
+passed in).
 
-Steps
-- Sync Scored and Error outputs; include ScoredPose if enabled.
-- Skip *.tmp and zero-byte placeholders.
+Formatting (matches your global rules)
+- Banner: 75 chars
+- Content rows: 72 chars (2-space indent; dash-fill starts 2 spaces after the
+  longest label in the block and ends 2 spaces before the value)
+- Only durations use lettered format (MMmSSs or HHhMMm).
+
+Inputs
+- run_started_at: optional 'HH:MM:SS' (for provenance; not used in math)
+- loading_seconds: optional numeric duration from Section 1 staging
+- scoring_seconds: optional numeric duration computed in Main just before sync
+- dest_path_override: optional alternative path string for the 'SAVED IN DRIVE' row
+- verbose: if True, we may print — but only when scoring_seconds > 0
 """
+
+def done_duck(i=24): return f"""\n\n\n\n{' '*(i+9)}__(·)<    ,\n{' '*(i+6)}O  \\_) )   c|_|\n{' '*i}{'~'*27}"""
 
 def sync_outputs_back(
     local_paths: LocalPaths,
     drive_paths: DrivePaths,
     pose_scoring: Optional[bool] = None,
     *,
-    verbose: bool = False
+    verbose: bool = True,
+    run_started_at: Optional[str] = None,
+    loading_seconds: Optional[float] = None,
+    scoring_seconds: Optional[float] = None,
+    dest_path_override: Optional[str] = None,
 ) -> None:
     """
-    Copy outputs from local → Drive in bulk (resilient, skip placeholders).
+    Copy outputs from local → Drive in bulk (resilient, skip placeholders),
+    then (optionally) print the final 'SCORING AND SAVING COMPLETE' block with:
+      - SAVED IN DRIVE
+      - SESSION TIME (Loading + Scoring + Saving)
+      - Subrows: Loading time, Scoring time, Saving time
+      - Closing 75-char '=' banner
+
+    Printing occurs only if 'verbose' is True **and** scoring_seconds > 0.
     """
     if pose_scoring is None:
         pose_scoring = drive_paths.pose.exists() and any(drive_paths.pose.rglob("*.csv"))
 
+    # --- Copy + measure saving time ---
     t0 = time.perf_counter()
 
     _copy_tree(local_paths.scored, drive_paths.scored, patterns=("*.csv",), upload_mode=True)
@@ -591,11 +771,49 @@ def sync_outputs_back(
     if pose_scoring:
         _copy_tree(local_paths.scoredpose, drive_paths.scoredpose, patterns=("*.csv",), upload_mode=True)
 
-    if verbose:
-        t1 = time.perf_counter()
-        print("\n\n================ SCORING AND SAVING COMPLETE ================")
-        print("\n              Synced outputs back to Drive.")
-        print(f"                 Sync time     : {_fmt_seconds(t1 - t0)}")
+    t1 = time.perf_counter()
+    saving_seconds = max(0.0, t1 - t0)
+
+    # --- Only show the pretty final block when scoring_seconds indicates completion ---
+    if verbose and scoring_seconds and scoring_seconds > 0.0:
+        # Duck + banner
+        print(done_duck())
+        print(_banner("SCORING AND SAVING COMPLETE"))
+        print()
+
+        # Row: SAVED IN DRIVE
+        dest_str = str(dest_path_override) if dest_path_override else str(drive_paths.root)
+        L_saved = len("SAVED IN DRIVE")
+        print(_kv_line("SAVED IN DRIVE", dest_str, L_saved))
+        print()
+
+        # Durations
+        load_s  = max(0.0, float(loading_seconds or 0.0))
+        score_s = max(0.0, float(scoring_seconds or 0.0))
+        save_s  = max(0.0, float(saving_seconds))
+        session_seconds = load_s + score_s + save_s
+
+        session_str = _fmt_duration_lettered(session_seconds)
+        load_str    = _fmt_duration_lettered(load_s)
+        score_str   = _fmt_duration_lettered(score_s)
+        save_str    = _fmt_duration_lettered(save_s)
+
+        # Align SESSION TIME dashes with SAVED IN DRIVE (use L_saved)
+        print(_kv_line("SESSION TIME", session_str, L_saved))
+
+        # Subrows use their own longest label for alignment within the trio
+        sub_labels = [
+            "------------    Loading time",
+            "------------    Scoring time",
+            "------------    Saving time",
+        ]
+        L_sub = max(len(s) for s in sub_labels)
+        print(_kv_line("------------    Loading time", load_str,  L_sub))
+        print(_kv_line("------------    Scoring time", score_str, L_sub))
+        print(_kv_line("------------    Saving time",  save_str,  L_sub))
+        print()
+        print("=" * 75)
+
 
 #%%% CELL 09 – BACKGROUND SYNC (SILENT, FINAL FILES ONLY)
 """

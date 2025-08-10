@@ -42,6 +42,9 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
     import os
     import pandas as pd
     import time
+    from collections import deque, Counter
+    from pathlib import Path
+
 
     #%%% CELL 02 - COMPUTE DERIVED VALUES
     """
@@ -90,8 +93,6 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
     - Wrap incoming paths as Path(...).
     - Create Scored/ and ScoredError/; add ScoredPose/ when enabled.
     """
-    
-    from pathlib import Path  # local import keeps the module lightweight
     
     # INPUT ROOTS (AS PATHS)
     post_root      = Path(PATHconfig.pPostProcessing)
@@ -154,53 +155,63 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
     prev_time = start_time    # time of previous loop iteration
 
 
-    #%%% CELL 05a – PER-FILE LOOP & PROGRESS
+    #%%% CELL 05a – PER-FILE LOOP & PROGRESS (EMA smoothing + modular ETA)
     """
     Purpose
-    Iterate over files to process, compute per-iteration timing and ETA, and
-    print a concise progress line. Ensure filename_tracked is a string so
-    we can safely use str.replace (not Path.replace).
+    Iterate over files to process and print progress using an EMA of successful-file
+    durations (alpha=0.33) with a clamp [0.5×ema, 2.0×ema]. The SCORING line shows
+    either 'estimating…' (before first success) or '{xx.xx}s/file | {ETA} eta' with
+    a static 28-char ASCII bar. Error files are *ignored* for the EMA update.
+    
+    Also initializes t_scoring_start so Section 5 can report 'Scoring time'.
     
     Steps
-    - Begin per-file loop over to_process (list of Path objects).
-    - Derive filename_tracked as a string via .name.
-    - Compute delta/eta and print the standardized progress line.
+    - Keep ema_seconds (None until first success).
+    - For each file i:
+      - Print SCORING line using ema_seconds (or 'estimating…' if None).
+      - Time this file’s core work; on success: clamp & update EMA.
+      - On error: do not update EMA.
+    - Remaining files for ETA = session_total - (idx - 1)
     """
     
+    # EMA state
+    ema_seconds = None
+    ALPHA = 0.33
+    
+    session_total = len(to_process)
+    session_error_types = Counter()
+    session_errors = 0
+    
+    # --- Scoring timer start (used for Section 5 final print) ---
+    t_scoring_start = time.perf_counter()
+    
     for idx, tracked_path in enumerate(to_process, start=1):
-        # FILENAME (STRING) FOR COMPATIBILITY WITH DOWNSTREAM HELPERS
-        filename_tracked = tracked_path.name  # ensure string, not Path
+        # Remaining files *to attempt* including current
+        remaining = session_total - (idx - 1)
     
-        # TIMING METRICS
-        now = time.time()
-        delta_s = now - prev_time
-        prev_time = now
+        # Compose SCORING line
+        if ema_seconds is None:
+            print(BSF.report_scoring_line(idx, session_total, None, None))
+        else:
+            eta_seconds = max(0.0, ema_seconds * remaining)
+            print(BSF.report_scoring_line(idx, session_total, ema_seconds, eta_seconds))
     
-        # SIMPLE ETA: average per-file * remaining
-        avg_per_file = (now - start_time) / max(idx, 1)
-        remaining = len(to_process) - idx
-        eta_seconds = max(remaining * avg_per_file, 0.0)
-        eta = f"{int(eta_seconds // 3600):02d}h{int((eta_seconds % 3600) // 60):02d}"
+        # Start timing this file’s *core* work (exclude any Drive sync)
+        t_file_start = time.perf_counter()
     
-        # SHORT DISPLAY NAME
-        basename = filename_tracked.replace("_tracked.csv", "")  # safe string replace
+        # String filename for error helpers
+        filename_tracked = tracked_path.name
     
-        # PRINT PROGRESS LINE
-        print(BSF.report_scoring_line(idx, len(to_process), delta_s, eta, basename))
+        
+            
 
 
         #%%% CELL 05b – LOAD TRACKED DATA & VALIDATE STIMULUS
         """
         Purpose
-        Load tracked data from a Path, clean alignment pulses, validate stimulus
-        count/duration, set the first stimulus index, and check centroid coverage.
-        
-        Steps
-        - Read the tracked CSV via Path.
-        - Clean the alignment column with binary helpers.
-        - Detect onsets and validate expected count.
-        - Validate durations using integer frames from ExperimentConfig.
-        - Set first_stim and verify centroid NaN tolerance.
+        Load tracked data, clean alignment, validate stimulus count/duration, set the
+        first stimulus index, and check centroid coverage. On checkpoint failures,
+        print the standardized error block (short label + filename) and continue.
         """
         
         # FULL PATH TO CURRENT FILE
@@ -210,11 +221,16 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
         try:
             tracked_df = pd.read_csv(tracked_file_path)
         except Exception:
-            #CHECKPOINT: Error reading tracked file
-            error_reading_file = BSF.checkpoint_fail(
-                pd.DataFrame(), filename_tracked, "ERROR_READING_FILE",
+            # CHECKPOINT: Error reading tracked file
+            error_key = "ERROR_READING_FILE"
+            error_reading_file, err_text = BSF.checkpoint_fail(
+                pd.DataFrame(), filename_tracked, error_key,
                 error_reading_file, PATHconfig.pScoredError
             )
+            session_errors += 1
+            session_error_types[error_key] += 1
+            print(BSF.report_error_line(error_key, err_text))
+            print(BSF.report_error_filename(filename_tracked.replace("_tracked.csv", "")))
             continue  # skip to next file on read error
         
         # CLEAN ALIGNMENT (SMOOTH SPURIOUS TOGGLES)
@@ -223,36 +239,60 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
         
         # ONSETS: diff()>0 FINDS 0→1 TRANSITIONS
         stim_indices = tracked_df.index[tracked_df[EXPconfig.ALIGNMENT_COL].diff() > 0].tolist()
-        if not stim_indices or len(stim_indices) != EXPconfig.EXPECTED_STIMULUS:
-            #CHECKPOINT: Wrong stimulus count
-            wrong_stim_count = BSF.checkpoint_fail(
-                tracked_df, filename_tracked, "WRONG_STIMULUS_COUNT",
-                wrong_stim_count, PATHconfig.pScoredError
+        if (not stim_indices) or (len(stim_indices) != EXPconfig.EXPECTED_STIMULUS):
+            # CHECKPOINT: Wrong stimulus count
+            error_key = "WRONG_STIMULUS_COUNT"
+            details = (f"Found {len(stim_indices)} | "
+                       f"Expected {EXPconfig.EXPECTED_STIMULUS}")
+            wrong_stim_count, err_text = BSF.checkpoint_fail(
+                tracked_df, filename_tracked, error_key,
+                wrong_stim_count, PATHconfig.pScoredError, details=details
             )
+            session_errors += 1
+            session_error_types[error_key] += 1
+            print(BSF.report_error_line(error_key, err_text))
+            print(BSF.report_error_filename(filename_tracked.replace("_tracked.csv", "")))
             continue
         
         # DURATION CHECK USING INTEGER FRAMES FROM EXPERIMENTCONFIG
         expected_duration_frames = EXPconfig.stimulus_duration_frames  # int frames
         durations = BSF.bout_duration(tracked_df, EXPconfig.ALIGNMENT_COL)
+        min_dur, max_dur = min(durations), max(durations)
         if any(abs(d - expected_duration_frames) > BSconfig.NOISE_TOLERANCE for d in durations):
-            #CHECKPOINT: Wrong stimulus duration
-            wrong_stim_duration = BSF.checkpoint_fail(
-                tracked_df, filename_tracked, "WRONG_STIMULUS_DURATION",
-                wrong_stim_duration, PATHconfig.pScoredError
+            # CHECKPOINT: Wrong stimulus duration
+            error_key = "WRONG_STIMULUS_DURATION"
+            details = (f"Min {min_dur}f, Max {max_dur}f | "
+                       f"Expected {expected_duration_frames}f")
+            wrong_stim_duration, err_text = BSF.checkpoint_fail(
+                tracked_df, filename_tracked, error_key,
+                wrong_stim_duration, PATHconfig.pScoredError, details=details
             )
+            session_errors += 1
+            session_error_types[error_key] += 1
+            print(BSF.report_error_line(error_key, err_text))
+            print(BSF.report_error_filename(filename_tracked.replace("_tracked.csv", "")))
             continue
         
         # FIRST STIMULUS INDEX (ALIGNMENT ANCHOR)
         first_stim = stim_indices[0]
         
-        # CENTROID NAN TOLERANCE (FRACTION OF FILE LENGTH)
+        # CENTROID NAN TOLERANCE (PERCENT OF FILE LENGTH)
+        total_frames = len(tracked_df)
         pos_nan_count = tracked_df["NormalizedCentroidX"].isna().sum()
-        if pos_nan_count > (NUMBER_FRAMES * BSconfig.NAN_TOLERANCE):
-            #CHECKPOINT: Too many centroid NaNs
-            lost_centroid_position = BSF.checkpoint_fail(
-                tracked_df, filename_tracked, "LOST_CENTROID_POSITION",
-                lost_centroid_position, PATHconfig.pScoredError
+        pct_nans = int(round(100 * (pos_nan_count / max(1, total_frames))))
+        allowed_pct = int(round(100 * BSconfig.NAN_TOLERANCE))
+        if pos_nan_count > (total_frames * BSconfig.NAN_TOLERANCE):
+            # CHECKPOINT: Too many centroid NaNs
+            error_key = "LOST_CENTROID_POSITION"
+            details = f"{pct_nans}% | < {allowed_pct}% allowed"
+            lost_centroid_position, err_text = BSF.checkpoint_fail(
+                tracked_df, filename_tracked, error_key,
+                lost_centroid_position, PATHconfig.pScoredError, details=details
             )
+            session_errors += 1
+            session_error_types[error_key] += 1
+            print(BSF.report_error_line(error_key, err_text))
+            print(BSF.report_error_filename(filename_tracked.replace("_tracked.csv", "")))
             continue
 
 
@@ -302,18 +342,28 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
             transform_df["Position_X"], transform_df["Position_Y"], FRAME_SPAN_SEC
         ).round(2)  # one rounding place only
 
+
         #%%% CELL 05d – POSE DATA (OPTIONAL)
         """
         Purpose
         Resolve the pose file via Path math, select a per-frame view by confidence,
-        apply a vertical fallback, validate NaN rate, convert to millimetres, and
-        compute orientation. Any failure triggers a checkpoint.
+        validate NaN rate, convert to mm, and compute orientation.
         
-        Steps
-        - Build pose path from the tracked Path.
-        - Validate presence and length match.
-        - Choose view (max confidence) and apply vertical fallback.
-        - Validate NaN rate, convert to mm, and compute orientation.
+        Specific rule you requested:
+        - IGNORE Bottom entirely unless ALL THREE columns exist:
+          Bottom.Confidence, Bottom.Position.X, Bottom.Position.Y
+        - Left/Right/Top are considered if they have Position.X and Position.Y;
+          their Confidence is optional (used if present).
+        
+        Remaining behavior (unchanged from your workflow):
+        - If pose file missing: checkpoint 'MISSING_POSE_FILE'.
+        - If length mismatch (tracked vs pose-1): checkpoint 'POSE_MISMATCH'.
+        - If Head/Thorax/Abdomen present:
+            * If any confidence cols exist → choose argmax across available confs.
+            * Else → choose the first available view with Position.X/Y.
+        - Otherwise → Vertical fallback: Head first, else Abdomen.
+        - Human 'View': Bottom is mapped to Top (ceiling/floor unification).
+        - NaN rate check on View_X (VIEW_NAN_EXCEEDED).
         """
         
         if EXPconfig.POSE_SCORING:
@@ -322,210 +372,296 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
             pose_path = Path(PATHconfig.pPose) / filename_pose
         
             if not pose_path.exists():
-                #CHECKPOINT: Missing pose file
-                missing_pose_file = BSF.checkpoint_fail(
-                    tracked_df, filename_tracked, "MISSING_POSE_FILE",
+                # CHECKPOINT: Missing pose file (no details)
+                error_key = "MISSING_POSE_FILE"
+                missing_pose_file, err_text = BSF.checkpoint_fail(
+                    tracked_df, filename_tracked, error_key,
                     missing_pose_file, PATHconfig.pScoredError
                 )
+                session_errors += 1
+                session_error_types[error_key] += 1
+                print(BSF.report_error_line(error_key, err_text))
+                print(BSF.report_error_filename(filename_tracked.replace("_tracked.csv", "")))
                 continue
         
             pose_df = pd.read_csv(pose_path, sep=",")
         
             # SOURCE FILES ARE OFF BY ONE ROW (HEADER DIFFERENCE)
-            if len(tracked_df) != len(pose_df) - 1:
-                #CHECKPOINT: Pose length mismatch
-                pose_mismatch = BSF.checkpoint_fail(
-                    tracked_df, filename_tracked, "POSE_MISMATCH",
-                    pose_mismatch, PATHconfig.pScoredError
+            tracked_len = len(tracked_df)
+            pose_len = len(pose_df) - 1
+            if tracked_len != pose_len:
+                # CHECKPOINT: Pose length mismatch
+                error_key = "POSE_MISMATCH"
+                details = f"Tracked {tracked_len} | Pose {pose_len}"
+                pose_mismatch, err_text = BSF.checkpoint_fail(
+                    tracked_df, filename_tracked, error_key,
+                    pose_mismatch, PATHconfig.pScoredError, details=details
                 )
+                session_errors += 1
+                session_error_types[error_key] += 1
+                print(BSF.report_error_line(error_key, err_text))
+                print(BSF.report_error_filename(filename_tracked.replace("_tracked.csv", "")))
                 continue
         
-            # IF HEAD/THORAX/ABDOMEN EXIST, PICK VIEW WITH HIGHEST CONFIDENCE
-            valid_mask = pose_df[["Head.Position.X", "Thorax.Position.X",
-                                  "Abdomen.Position.X"]].notna().all(axis=1)
-            pose_df["Selected_View"] = "Vertical"  # default until proven
-            pose_df.loc[valid_mask, "Selected_View"] = (
-                pose_df.loc[valid_mask, ["Left.Confidence", "Right.Confidence",
-                                         "Top.Confidence", "Bottom.Confidence"]]
-                .idxmax(axis=1).str.replace(".Confidence", "", regex=False)
-            )
+            # Determine available views (Bottom has special rule: must have all three columns)
+            ALL_VIEWS = ["Left", "Right", "Top", "Bottom"]
+            cols = set(pose_df.columns)
         
-            # COPY COORDS FOR THE SELECTED VIEW INTO View_X / View_Y
-            for v in ["Left", "Right", "Top", "Bottom"]:
+            def has_pos(v: str) -> bool:
+                return (f"{v}.Position.X" in cols) and (f"{v}.Position.Y" in cols)
+        
+            def has_conf(v: str) -> bool:
+                return f"{v}.Confidence" in cols
+        
+            available_views: list[str] = []
+            conf_cols: list[str] = []
+        
+            for v in ALL_VIEWS:
+                if v == "Bottom":
+                    # Only include Bottom if ALL THREE exist
+                    if has_pos("Bottom") and has_conf("Bottom"):
+                        available_views.append("Bottom")
+                        conf_cols.append("Bottom.Confidence")
+                    # else: ignore Bottom entirely
+                else:
+                    # For Left/Right/Top: need positions; confidence optional
+                    if has_pos(v):
+                        available_views.append(v)
+                        if has_conf(v):
+                            conf_cols.append(f"{v}.Confidence")
+        
+            # Initialize Selected_View
+            pose_df["Selected_View"] = "Vertical"
+        
+            # Valid row mask when Head/Thorax/Abdomen present
+            htx_ok = pose_df[["Head.Position.X", "Thorax.Position.X", "Abdomen.Position.X"]].notna().all(axis=1)
+        
+            if any(htx_ok):
+                if conf_cols:
+                    # Choose per-row argmax across the confidences that actually exist
+                    conf_frame = pose_df[conf_cols].copy()
+                    # fill NaNs to avoid "All-NA slice" issues; -1 keeps "lowest" meaning
+                    conf_frame = conf_frame.fillna(-1.0)
+                    chosen_conf = conf_frame.idxmax(axis=1)
+                    pose_df.loc[htx_ok, "Selected_View"] = chosen_conf.str.replace(".Confidence", "", regex=False)
+                elif available_views:
+                    # No confidence columns at all, but we have positions: pick a stable fallback view
+                    pose_df.loc[htx_ok, "Selected_View"] = available_views[0]
+                # else: keep "Vertical" (no usable views); vertical fallback below will try Head/Abdomen
+        
+            # Copy coords for the selected view into View_X / View_Y (only when the Position cols exist)
+            pose_df["View_X"] = pd.NA
+            pose_df["View_Y"] = pd.NA
+            for v in available_views:
                 m = pose_df["Selected_View"] == v
-                pose_df.loc[m, "View_X"] = pose_df.loc[m, f"{v}.Position.X"]
-                pose_df.loc[m, "View_Y"] = pose_df.loc[m, f"{v}.Position.Y"]
+                if m.any():
+                    xcol = f"{v}.Position.X"
+                    ycol = f"{v}.Position.Y"
+                    pose_df.loc[m, "View_X"] = pose_df.loc[m, xcol]
+                    pose_df.loc[m, "View_Y"] = pose_df.loc[m, ycol]
         
-            # BOTTOM → TOP TO UNIFY CEILING/FLOOR AMBIGUITY
+            # Human-readable View; BOTTOM → TOP to unify ceiling/floor ambiguity
             pose_df["View"] = pose_df["Selected_View"].replace({"Bottom": "Top"})
         
-            # VERTICAL FALLBACK: USE HEAD IF PRESENT, ELSE ABDOMEN
+            # VERTICAL FALLBACK: when View == "Vertical", use Head; if NaN, use Abdomen
             mvert = pose_df["View"] == "Vertical"
-            pose_df.loc[mvert, "View_X"] = pose_df.loc[mvert, "Head.Position.X"].fillna(
-                pose_df.loc[mvert, "Abdomen.Position.X"]
-            )
-            pose_df.loc[mvert, "View_Y"] = pose_df.loc[mvert, "Head.Position.Y"].fillna(
-                pose_df.loc[mvert, "Abdomen.Position.Y"]
-            )
+            if mvert.any():
+                pose_df.loc[mvert, "View_X"] = pose_df.loc[mvert, "Head.Position.X"].fillna(
+                    pose_df.loc[mvert, "Abdomen.Position.X"]
+                )
+                pose_df.loc[mvert, "View_Y"] = pose_df.loc[mvert, "Head.Position.Y"].fillna(
+                    pose_df.loc[mvert, "Abdomen.Position.Y"]
+                )
         
             # KEEP HUMAN-READABLE VIEW LABEL
             transform_df["View"] = pose_df["View"]
         
-            #CHECKPOINT: TOO MANY NANS IN POSE VIEW COORDS
-            if pose_df["View_X"].isna().sum() > NUMBER_FRAMES * BSconfig.POSE_TRACKING_TOLERANCE:
-                view_nan_exceeded = BSF.checkpoint_fail(
-                    tracked_df, filename_tracked, "VIEW_NAN_EXCEEDED",
-                    view_nan_exceeded, PATHconfig.pScoredError
+            # CHECKPOINT: TOO MANY NaNs IN POSE VIEW COORDS
+            view_nan = pose_df["View_X"].isna().sum()
+            pct_view_nan = int(round(100 * (view_nan / max(1, NUMBER_FRAMES))))
+            allowed_pct = int(round(100 * BSconfig.POSE_TRACKING_TOLERANCE))
+            if view_nan > (NUMBER_FRAMES * BSconfig.POSE_TRACKING_TOLERANCE):
+                error_key = "VIEW_NAN_EXCEEDED"
+                details = f"{pct_view_nan}% | < {allowed_pct}% allowed"
+                view_nan_exceeded, err_text = BSF.checkpoint_fail(
+                    tracked_df, filename_tracked, error_key,
+                    view_nan_exceeded, PATHconfig.pScoredError, details=details
                 )
+                session_errors += 1
+                session_error_types[error_key] += 1
+                print(BSF.report_error_line(error_key, err_text))
+                print(BSF.report_error_filename(filename_tracked.replace("_tracked.csv", "")))
                 continue
         
             # VIEW IN MILLIMETRES; Y FLIPPED TO MATCH TRACKED CONVENTION
-            transform_df["View_X"] = pose_df["View_X"] * EXPconfig.ARENA_WIDTH_MM
-            transform_df["View_Y"] = (
-                pose_df["View_Y"] * EXPconfig.ARENA_HEIGHT_MM
-            ) * -1 + EXPconfig.ARENA_HEIGHT_MM
+            transform_df["View_X"] = pose_df["View_X"].astype(float) * EXPconfig.ARENA_WIDTH_MM
+            transform_df["View_Y"] = (pose_df["View_Y"].astype(float) * EXPconfig.ARENA_HEIGHT_MM) * -1 + EXPconfig.ARENA_HEIGHT_MM
         
-            # BODY PARTS IN MILLIMETRES FOR OPTIONAL DOWNSTREAM ANALYSIS
+            # BODY PARTS IN MILLIMETRES FOR OPTIONAL DOWNSTREAM ANALYSIS (only if present)
             for part in ["Head", "Thorax", "Abdomen", "LeftWing", "RightWing"]:
-                transform_df[f"{part}_X"] = pose_df[f"{part}.Position.X"] * EXPconfig.ARENA_WIDTH_MM
-                transform_df[f"{part}_Y"] = (
-                    pose_df[f"{part}.Position.Y"] * EXPconfig.ARENA_HEIGHT_MM
-                ) * -1 + EXPconfig.ARENA_HEIGHT_MM
+                xcol = f"{part}.Position.X"
+                ycol = f"{part}.Position.Y"
+                if (xcol in cols) and (ycol in cols):
+                    transform_df[f"{part}_X"] = pose_df[xcol].astype(float) * EXPconfig.ARENA_WIDTH_MM
+                    transform_df[f"{part}_Y"] = (pose_df[ycol].astype(float) * EXPconfig.ARENA_HEIGHT_MM) * -1 + EXPconfig.ARENA_HEIGHT_MM
         
-            # ORIENTATION (THORAX → VIEW) IN DEGREES, 0 = NORTH
-            transform_df["Orientation"] = BSF.calculate_orientation(
-                transform_df["Thorax_X"], transform_df["Thorax_Y"],
-                transform_df["View_X"],   transform_df["View_Y"]
-            )
+            # ORIENTATION (THORAX → VIEW) IN DEGREES, 0 = NORTH (only if thorax present)
+            if ("Thorax_X" in transform_df.columns) and ("Thorax_Y" in transform_df.columns):
+                transform_df["Orientation"] = BSF.calculate_orientation(
+                    transform_df["Thorax_X"], transform_df["Thorax_Y"],
+                    transform_df["View_X"],   transform_df["View_Y"]
+                )
 
 
-        #%%% CELL 05f - LAYER 1 - THRESHOLDS
+
+
+        #%%% CELL 05f – LAYER 1 – THRESHOLDS
         """
         Purpose
-        Apply speed/motion thresholds to produce Layer 1 one-hots and a label.
-        Vectorized np.select avoids row loops for performance and clarity.
-
+        Apply speed/motion thresholds to produce Layer 1 one-hots and a label. Use
+        vectorized selection for clarity and performance, then verify the share of
+        unassigned frames against the configured tolerance (reported in percent).
+        
         Steps
         - Create one-hots for jump/walk/stationary/freeze.
         - Build 'Layer1' label via np.select.
-        - Check unassigned proportion against tolerance.
+        - Check unassigned proportion against LAYER1_TOLERANCE (percent detail).
         """
+        
         # One-hot columns for Layer 1
         LAYER1_COLUMNS = ["layer1_jump", "layer1_walk",
                           "layer1_stationary", "layer1_freeze", "layer1_none"]
-
-        # Jump when speed crosses the high threshold
-        transform_df["layer1_jump"] = (transform_df["Speed"] >= BSconfig.HIGH_SPEED).astype(int)
-
-        # Walk is between low and high thresholds
+        
+        for c in LAYER1_COLUMNS:
+            transform_df[c] = 0
+        
+        # Jump depends on instantaneous speed and motion flag
+        transform_df["layer1_jump"] = (
+            (transform_df["Speed"] >= BSconfig.HIGH_SPEED) &
+            (transform_df["Motion"] > 0)
+        ).astype(int)
+        
+        # Walk is moderate speed with motion
         transform_df["layer1_walk"] = (
             (transform_df["Speed"] >= BSconfig.LOW_SPEED) &
-            (transform_df["Speed"] < BSconfig.HIGH_SPEED)
+            (transform_df["Speed"] < BSconfig.HIGH_SPEED) &
+            (transform_df["Motion"] > 0)
         ).astype(int)
-
-        # Stationary has motion but low speed
+        
+        # Stationary is sub-threshold speed with any motion present
         transform_df["layer1_stationary"] = (
             (transform_df["Speed"] < BSconfig.LOW_SPEED) &
             (transform_df["Motion"] > 0)
         ).astype(int)
-
+        
         # Freeze has no motion at all
         transform_df["layer1_freeze"] = (transform_df["Motion"] == 0).astype(int)
-
+        
         # Vectorized label; default None when no category matches
         conditions = [
             transform_df["layer1_jump"] == 1,
             transform_df["layer1_walk"] == 1,
             transform_df["layer1_stationary"] == 1,
-            transform_df["layer1_freeze"] == 1
+            transform_df["layer1_freeze"] == 1,
         ]
         choices = ["Layer1_Jump", "Layer1_Walk", "Layer1_Stationary", "Layer1_Freeze"]
         transform_df["Layer1"] = np.select(conditions, choices, default=None)
-
-        #CHECKPOINT: Too many unassigned Layer 1 frames
+        
+        # CHECKPOINT: Too many unassigned Layer 1 frames (percent)
+        total_frames = len(tracked_df)  # safe denom for percent
         total_unassigned = transform_df["Layer1"].isna().sum()  # frames with no label
-        if total_unassigned > (NUMBER_FRAMES * BSconfig.LAYER1_TOLERANCE):
-            unassigned_behavior = BSF.checkpoint_fail(
-                tracked_df, filename_tracked, "UNASSIGNED_BEHAVIOR",
-                unassigned_behavior, PATHconfig.pScoredError
+        pct_unassigned = int(round(100 * (total_unassigned / max(1, total_frames))))
+        allowed_pct = int(round(100 * BSconfig.LAYER1_TOLERANCE))
+        
+        if total_unassigned > (total_frames * BSconfig.LAYER1_TOLERANCE):
+            error_key = "UNASSIGNED_BEHAVIOR"
+            details = f"{pct_unassigned}% | < {allowed_pct}% allowed"
+            unassigned_behavior, err_text = BSF.checkpoint_fail(
+                tracked_df, filename_tracked, error_key,
+                unassigned_behavior, PATHconfig.pScoredError, details=details
             )
+            session_errors += 1
+            session_error_types[error_key] += 1
+            print(BSF.report_error_line(error_key, err_text))  # short label + detail
+            print(BSF.report_error_filename(filename_tracked.replace("_tracked.csv", "")))
             continue
 
-        #%%% CELL 05g - LAYER 2 - SMALL SMOOTHING
+
+
+        #%%% CELL 05g – LAYER 2 – APPLYING SMALL SMOOTHING
         """
         Purpose
-        Smooth Layer 1 traces with a centered window, apply jump precedence,
-        enforce one behavior per frame, and label Layer 2. Also verify baseline
-        exploration before the first stimulus.
-
+        Smooth Layer 1 one-hots, pick a dominant behavior, enforce hierarchy, and
+        label Layer 2. Verify sufficient baseline exploration with percent details.
+        
         Steps
-        - Compute centered running averages for Layer 1 one-hots.
-        - Pick the dominant averaged behavior with a >0 guard.
-        - Apply jump precedence and enforce one behavior per frame.
-        - Create 'Layer2' label and check baseline walking time.
+        - Initialize layer 2 columns and apply centered smoothing.
+        - Vectorize dominant behavior selection and flags.
+        - Enforce hierarchy and set string label.
+        - Check baseline walking fraction (percent vs allowed).
         """
-        # Init Layer 2 one-hots to zeros
+        
         LAYER2_COLUMNS = ["layer2_jump", "layer2_walk",
                           "layer2_stationary", "layer2_freeze", "layer2_none"]
         for behavior in LAYER2_COLUMNS:
             transform_df[behavior] = 0
-
-        # Centered smoothing (window = LAYER2_AVG_WINDOW)
+        
+        # CENTERED SMOOTHING (WINDOW = LAYER2_AVG_WINDOW)
         layer2_avg_columns = ["layer2_jump_avg", "layer2_walk_avg",
                               "layer2_stationary_avg", "layer2_freeze_avg"]
         transform_df = BSF.calculate_center_running_average(
             transform_df, LAYER1_COLUMNS, layer2_avg_columns, LAYER2_AVG_WINDOW
         )
-
-        # Dominant averaged behavior per row; fillna to avoid idxmax errors
+        
+        # DOMINANT AVERAGED BEHAVIOR (ROW-WISE)
         temp = transform_df[layer2_avg_columns].fillna(-np.inf)
         max_values2 = temp.max(axis=1)
         max_behavior2 = temp.idxmax(axis=1)
         max_behavior2[max_values2 == -np.inf] = None  # no positive evidence → None
         max_behavior2[max_values2 <= 0] = None        # all nonpositive → None
-
-        # Jump precedence; only set others when jump is absent
+        
+        # BINARY FLAGS WITH JUMP PRECEDENCE
         transform_df["layer2_jump"] = (transform_df["layer2_jump_avg"] > 0).astype(int)
-        mask = transform_df["layer2_jump"] == 0  # jump present blocks others
-        transform_df.loc[mask, "layer2_walk"] = (
-            max_behavior2[mask] == "layer2_walk_avg"
-        ).astype(int)
+        mask = transform_df["layer2_jump"] == 0  # set others when jump is absent
+        transform_df.loc[mask, "layer2_walk"] = (max_behavior2[mask] == "layer2_walk_avg").astype(int)
         transform_df.loc[mask, "layer2_stationary"] = (
-            max_behavior2[mask] == "layer2_stationary_avg"
-        ).astype(int)
-        transform_df.loc[mask, "layer2_freeze"] = (
-            max_behavior2[mask] == "layer2_freeze_avg"
-        ).astype(int)
-
-        # None flag when all layer2_* are zero
-        transform_df["layer2_none"] = np.where(
-            transform_df[LAYER2_COLUMNS[:-1]].sum(axis=1) == 0, 1, 0
+            (max_behavior2[mask] == "layer2_stationary_avg").astype(int)
         )
-
-        # Enforce exclusivity; hierarchical rule keeps first positive only
+        transform_df.loc[mask, "layer2_freeze"] = (max_behavior2[mask] == "layer2_freeze_avg").astype(int)
+        
+        # NONE FLAG (NO POSITIVES)
+        transform_df["layer2_none"] = np.where(transform_df[LAYER2_COLUMNS[:-1]].sum(axis=1) == 0, 1, 0)
+        
+        # HIERARCHICAL SELECTION (ONE BEHAVIOR PER FRAME)
         transform_df = BSF.hierarchical_classifier(transform_df, LAYER2_COLUMNS)
-
-        # Vectorized Layer 2 label
-        conditions2 = [
-            transform_df["layer2_jump"] == 1, transform_df["layer2_walk"] == 1,
-            transform_df["layer2_stationary"] == 1, transform_df["layer2_freeze"] == 1
-        ]
+        
+        # LAYER 2 LABEL (VECTORIZED)
+        conditions2 = [transform_df["layer2_jump"] == 1, transform_df["layer2_walk"] == 1,
+                       transform_df["layer2_stationary"] == 1, transform_df["layer2_freeze"] == 1]
         choices2 = ["Layer2_Jump", "Layer2_Walk", "Layer2_Stationary", "Layer2_Freeze"]
         transform_df["Layer2"] = np.select(conditions2, choices2, default=None)
-
-        #CHECKPOINT: Too little exploration during baseline
+        
+        # CHECKPOINT: TOO LITTLE EXPLORATION DURING BASELINE (PERCENT)
         baseline_frames = EXPconfig.EXPERIMENTAL_PERIODS["Baseline"]["duration_frames"]
-        baseline_start = max(0, first_stim - baseline_frames)  # clamp at 0 to avoid negative
+        baseline_start = max(0, first_stim - baseline_frames)
         baseline_end = first_stim
-        walk_count = transform_df.loc[baseline_start:baseline_end, "Layer2"].eq(
-            "Layer2_Walk"
-        ).sum()
-        if walk_count < (BSconfig.BASELINE_EXPLORATION * baseline_frames):
-            no_exploration = BSF.checkpoint_fail(
-                transform_df, filename_tracked, "NO_EXPLORATION",
-                no_exploration, PATHconfig.pScoredError
+        walk_count_baseline = transform_df.loc[baseline_start:baseline_end, "Layer2"].eq("Layer2_Walk").sum()
+        
+        min_pct = int(round(100 * BSconfig.BASELINE_EXPLORATION))
+        walk_pct = int(round(100 * (walk_count_baseline / max(1, baseline_frames))))
+        if walk_count_baseline < (BSconfig.BASELINE_EXPLORATION * baseline_frames):
+            error_key = "NO_EXPLORATION"
+            details = f"Walk {walk_pct}% | > {min_pct}% allowed"
+            no_exploration, err_text = BSF.checkpoint_fail(
+                transform_df, filename_tracked, error_key,
+                no_exploration, PATHconfig.pScoredError, details=details
             )
+            session_errors += 1
+            session_error_types[error_key] += 1
+            print(BSF.report_error_line(error_key, err_text))
+            print(BSF.report_error_filename(filename_tracked.replace("_tracked.csv", "")))
             continue
+
 
         #%%% CELL 05j - RESISTANT BEHAVIORS
         """
@@ -600,13 +736,9 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
         #%%% CELL 05m – ALIGN AND SAVE
         """
         Purpose
-        Align outputs around the first stimulus and write atomically. Indices rely
-        on integer frames from ExperimentConfig; no ad-hoc casting is needed.
-        
-        Steps
-        - Slice from baseline to the end of the experiment window.
-        - Save Scored/ and ScoredPose/ (when enabled) using atomic writes.
-        - Verify aligned length matches total frames.
+        Align outputs around the first stimulus and write atomically. If the aligned
+        length mismatches the expected total frames, emit a checkpoint and continue.
+        On success, update the EMA using the core duration measured since t_file_start.
         """
         
         # OUTPUT SCHEMA; ENSURE CONFIG INCLUDES ANY FIELDS YOU RELY ON
@@ -615,18 +747,24 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
         # COMPUTE START/END USING INTS FROM EXPERIMENTCONFIG
         baseline_frames = EXPconfig.EXPERIMENTAL_PERIODS["Baseline"]["duration_frames"]
         total_frames = EXPconfig.EXPERIMENTAL_PERIODS["Experiment"]["duration_frames"]
-        start_idx = first_stim - baseline_frames            # frames before first stimulus
+        start_idx = first_stim - baseline_frames
         end_idx = first_stim + (total_frames - baseline_frames)  # exclusive end
         
         # SLICE AND REINDEX; THIS BECOMES THE SCORED FILE
         aligned_output_df = output_df.iloc[start_idx:end_idx, :].reset_index(drop=True)
         
-        #CHECKPOINT: ALIGNED OUTPUT SHORTER THAN EXPECTED
+        # CHECKPOINT: ALIGNED OUTPUT SHORTER THAN EXPECTED (DETAILS)
         if len(aligned_output_df) != total_frames:
-            output_len_short = BSF.checkpoint_fail(
-                aligned_output_df, filename_tracked, "OUTPUT_LEN_SHORT",
-                output_len_short, PATHconfig.pScoredError
+            error_key = "OUTPUT_LEN_SHORT"
+            details = f"Aligned {len(aligned_output_df)} | Expected {total_frames}"
+            output_len_short, err_text = BSF.checkpoint_fail(
+                aligned_output_df, filename_tracked, error_key,
+                output_len_short, PATHconfig.pScoredError, details=details
             )
+            session_errors += 1
+            session_error_types[error_key] += 1
+            print(BSF.report_error_line(error_key, err_text))
+            print(BSF.report_error_filename(filename_tracked.replace("_tracked.csv", "")))
             continue
         
         # SAVE SCORED (PATH-LIKE DESTINATIONS)
@@ -639,7 +777,6 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
         if EXPconfig.POSE_SCORING:
             output_pose_df = transform_df[BSconfig.SCORED_POSE_COLUMNS]
             aligned_output_pose_df = output_pose_df.iloc[start_idx:end_idx, :].reset_index(drop=True)
-        
             scored_pose_file = filename_tracked.replace("tracked.csv", "scored_pose.csv")
             BSF.write_csv_atomic(
                 aligned_output_pose_df, scored_pose_root / scored_pose_file,
@@ -647,35 +784,89 @@ def behavior_scoring_main(PATHconfig, EXPconfig, BSconfig, BSF):
             )
         
         scored_files += 1  # one more successful output
+        
+        # ---- EMA UPDATE (success only) ----
+        t_file_end = time.perf_counter()
+        duration = max(0.0, t_file_end - t_file_start)
+        
+        if ema_seconds is None:
+            ema_seconds = duration
+        else:
+            # Clamp new observation to [0.5×ema, 2.0×ema]
+            lower = 0.5 * ema_seconds
+            upper = 2.0 * ema_seconds
+            d_clamped = min(max(duration, lower), upper)
+            ema_seconds = (ALPHA * d_clamped) + ((1.0 - ALPHA) * ema_seconds)
 
 
-    #%%% CELL 06 - SUMMARY
+
+    #%%% CELL 06 – SUMMARY (SESSION vs GLOBAL)
     """
     Purpose
-    Print the final summary, including elapsed time and error breakdown. The
-    duck marks the end of the run to make logs easy to scan.
-
-    Steps
-    - Compute elapsed time and aggregate error counts.
-    - Print the formatted summary block followed by the duck.
+    Summarize the run with a two-column table that shows SESSION and GLOBAL
+    error counts and percents, plus a per-error-type breakdown. Precede the
+    table with aligned kv lines for file counts. Compute 'Scoring time' for
+    Section 5 and return it to the caller (runner / notebook) so the sync step
+    can print the final timing block.
+    
+    Rules
+    - FILES PROCESSED = scored_files + session_errors (this run only).
+    - Session TOTAL % = session_errors / FILES PROCESSED.
+    - Global TOTAL % = (existing_errors + this_run_errors) / total_tracked_in_folder.
+      (We call scan_global_stats AFTER writing, so its 'errors' includes this run.)
+    - Labels/order exactly match the short names you approved.
+    
+    Output
+    - 75-col banner 'SESSION SUMMARY'
+    - 72-col KV rows for: FILES FOUND, FILES PROCESSED, FILES SCORED
+    - Fixed-width numeric cells (width=9) for SESSION and GLOBAL columns
+    - Your done duck :)
     """
-    end_time = time.time()
-    total_time = end_time - start_time
-    total_time_str = f"{int(total_time // 3600):02d}h{int((total_time % 3600) // 60):02d}"
-
-    # Sum all errors for a simple percentage in the report
-    error_count = (
-        error_reading_file + wrong_stim_count + wrong_stim_duration + lost_centroid_position +
-        pose_mismatch + missing_pose_file + view_nan_exceeded + unassigned_behavior +
-        no_exploration + output_len_short
+    
+    # SESSION TOTALS (from the loop)
+    files_scored_session = scored_files
+    session_per_type = session_error_types
+    session_errors = sum(session_per_type.values())
+    files_processed_session = files_scored_session + session_errors
+    
+    # --- Compute Scoring time (from t_scoring_start to here, before any sync) ---
+    t_scoring_end = time.perf_counter()
+    scoring_seconds = max(0.0, t_scoring_end - t_scoring_start)
+    
+    # GLOBAL STATS UNDER CURRENT EXPERIMENT ROOT
+    global_stats = BSF.scan_global_stats(PATHconfig)
+    
+    # PRINT SUMMARY + DUCK
+    print(
+        BSF.report_final_summary_dual(
+            files_found=total_files,
+            files_processed_session=files_processed_session,
+            files_scored_session=files_scored_session,
+            session_per_type=session_per_type,
+            global_stats=global_stats,
+        )
     )
+    
+    # Return timing for Section 5 (runner/notebook can pass to sync step)
+    # (Safe if ignored by existing callers.)
+    return {
+        "scoring_seconds": scoring_seconds,
+        "files_scored_session": files_scored_session,
+        "session_errors": session_errors,
+        "files_processed_session": files_processed_session,
+    }
 
-    print(BSF.report_final_summary(
-        total_time_str, total_files, scored_files, error_count, error_reading_file,
-        missing_pose_file, wrong_stim_count, wrong_stim_duration, lost_centroid_position,
-        pose_mismatch, view_nan_exceeded, unassigned_behavior, no_exploration, output_len_short
-    ) + BSF.done_duck())
 
+
+#%%% CELL 07 – EXECUTION GUARD
+"""
+Purpose
+Prevent accidental module execution in Colab; this file is imported by the
+notebook or by a runner script that calls the public functions.
+
+Steps
+- Raise a clear error if executed directly.
+"""
 
 if __name__ == "__main__":
     # This module is intended to be called by a runner or notebook. Import and call:
