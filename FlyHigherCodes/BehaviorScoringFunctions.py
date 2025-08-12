@@ -235,10 +235,11 @@ def bout_duration(df, column):
 #%%% CELL 05 – KINEMATICS & VIEW/ORIENTATION
 """
 Purpose
-Compute speed and select a per-frame best view for pose use.
+Compute speed, orientation, and select a per-frame best view for pose use.
 
 Steps
 - Calculate speed in mm/s as floats (rounding done at the call site).
+- Compute orientation from A→B, normalized to [0, 360) with 0° = North.
 - Determine view from confidences or use vertical fallback logic.
 """
 
@@ -259,12 +260,44 @@ def calculate_speed(column_x, column_y, frame_span_sec):
     speed = distance / frame_span_sec      # mm/s as float
     return speed.astype(float)
 
+def calculate_orientation(pointA_x, pointA_y, pointB_x, pointB_y):
+    """
+    Compute orientation from A→B in degrees, normalized to [0, 360) with 0° = North.
+
+    Robustness:
+    - Local NumPy import so notebook-level 'np' shadowing can’t break it.
+    - Convert inputs to NumPy arrays to bypass pandas __array_ufunc__ dispatch.
+    - Preserve index if inputs are pandas Series.
+    """
+    import numpy as _np
+
+    idx = getattr(pointA_x, "index", None)
+
+    ax = _np.asarray(pointA_x, dtype=float)
+    ay = _np.asarray(pointA_y, dtype=float)
+    bx = _np.asarray(pointB_x, dtype=float)
+    by = _np.asarray(pointB_y, dtype=float)
+
+    dx = bx - ax
+    dy = ay - by  # invert y so 0° points "up"/North
+
+    angle = _np.arctan2(dy, dx)
+    deg = _np.degrees(angle)
+    deg = (deg + 360) % 360    # wrap to [0,360)
+    deg = (deg + 90) % 360     # rotate so 0 = North
+    deg = _np.round(deg, 2)
+
+    if idx is not None and deg.shape == (len(idx),):
+        import pandas as _pd
+        return _pd.Series(deg, index=idx, name="Orientation")
+    return deg
 
 def determine_view(row):
     """
     Choose a view per frame using confidences. When all three body parts are
     present, pick the view (Left/Right/Top/Bottom) with highest confidence.
     For vertical cases, prefer Head if present, else Abdomen; otherwise NaN.
+    Returns: (view_label, x, y) where x/y are the chosen coordinates (or NaN).
     """
     # full key positions available → pick by confidence
     if (pd.notna(row.get("Head.Position.X")) and
@@ -283,12 +316,13 @@ def determine_view(row):
 
     # vertical fallback using head or abdomen
     if pd.notna(row.get("Head.Position.X")) or pd.notna(row.get("Abdomen.Position.X")):
-        if pd.notna(row.get("Head.Position.X")):       # prefer head when present
+        if pd.notna(row.get("Head.Position.X")):  # prefer head when present
             return "Vertical", row.get("Head.Position.X", np.nan), row.get("Head.Position.Y", np.nan)
         return "Vertical", row.get("Abdomen.Position.X", np.nan), row.get("Abdomen.Position.Y", np.nan)
 
     # no valid coordinates
     return np.nan, np.nan, np.nan
+
 
 
 #%%% CELL 06 – SMOOTHING & HIERARCHY
@@ -398,23 +432,23 @@ def write_csv_atomic(df, final_path, **to_csv_kwargs) -> None:
 
     os.replace(str(tmp_path), str(final_path))  # atomic rename to final
 
+
 #%%% CELL 09 – REPORTING & GLOBAL STATS
 """
 Purpose
 Provide helpers to format:
 - Section 2 header (exact 75/72 alignment).
-- Section 3 progress lines with a static 28-char bar and modular ETA.
-- Section 3 error lines using short labels and 72-col dash-fill.
+- Section 3 pinned progress (two-line bar + metrics) + counts (SCORED / ERROR).
+- Section 3 error lines (short labels + 72-col dash-fill).
 - Section 4 dual SESSION|GLOBAL summary with fixed-width numeric cells.
-Also contains robust orientation + small utilities used in Main.
 
-Global formatting rules (agreed):
+Global formatting rules:
 - Banner width: 75 (centered, ALL CAPS)
 - Content width: 72 (each content line starts at 2 spaces and ends at col 72)
 - KV rule: dash-fill starts 2 spaces after the longest label in the block and
   ends 2 spaces before the value; internal separators have 2 spaces around.
-- Timestamps stay HH:MM:SS; computed durations use lettered style.
-- Center truncation for overlong values to fit width 72.
+- Timestamps = HH:MM:SS; computed durations use lettered style.
+- Center truncation for overlong values to fit width 72 (except filename line).
 """
 
 from pathlib import Path
@@ -430,11 +464,15 @@ CONTENT_WIDTH  = 72
 INDENT         = "  "   # two spaces
 VALUE_SEP      = "  "   # two spaces around grouped values and '---'
 
+# Progress bar geometry (fallback only)
 BAR_TOTAL = 25
 BAR_LEFT  = "["
 BAR_RIGHT = "]"
 BAR_FILL  = "#"
 BAR_EMPTY = "."
+
+# We only want the pinned display, no tree-style per-file prints:
+PRINT_TREE_ERRORS = False
 
 # -------------------------
 # Low-level helpers
@@ -456,13 +494,15 @@ def _truncate_center(s: str, max_len: int) -> str:
     keep_right = max_len - 3 - keep_left
     return s[:keep_left] + "..." + s[-keep_right:]
 
+def _truncate_left(s: str, max_len: int) -> str:
+    s = str(s)
+    if len(s) <= max_len:
+        return s
+    if max_len <= 3:
+        return s[-max_len:]
+    return "..." + s[-(max_len - 3):]
+
 def _kv_line_72(label: str, value: str, longest_label: int) -> str:
-    """
-    Return a single content row (exactly 72 visible chars):
-      '␣␣' + label + gap + dashes + '␣␣' + value
-    where gap = (longest_label - len(label)) + 2
-    and dash-fill ends 2 spaces before value.
-    """
     label = str(label)
     value = str(value)
 
@@ -480,12 +520,15 @@ def _kv_line_72(label: str, value: str, longest_label: int) -> str:
 
     return left + ("-" * dash_len) + "  " + v
 
-def _fmt_eta_modular(seconds: float) -> str:
-    """
-    ETA format:
-      - < 1h → 'MMmSSs'
-      - >=1h → 'HHhMMm' (minutes rounded from seconds; ≥30s → +1m)
-    """
+def _dash_value_line_72_from_start(value: str) -> str:
+    v = str(value)
+    max_dashes = CONTENT_WIDTH - len(INDENT) - 2 - len(v)
+    if max_dashes < 0:
+        v = _truncate_center(v, len(v) + max_dashes)
+        max_dashes = CONTENT_WIDTH - len(INDENT) - 2 - len(v)
+    return INDENT + ("-" * max_dashes) + "  " + v
+
+def _fmt_duration_lettered(seconds: float) -> str:
     s = int(round(max(seconds, 0)))
     h, rem = divmod(s, 3600)
     m, sec = divmod(rem, 60)
@@ -497,26 +540,10 @@ def _fmt_eta_modular(seconds: float) -> str:
         return f"{h:02d}h{m:02d}m"
     return f"{m:02d}m{sec:02d}s"
 
-def _fmt_eta_from_hhmm_str(hhmm: str) -> str:
-    """
-    Back-compat: convert 'HHhMM' to modular style.
-      - If HH == '00' → 'MMm00s'
-      - Else → 'HHhMMm'
-    """
-    m = re.match(r'^(\d{2})h(\d{2})$', str(hhmm))
-    if not m:
-        return str(hhmm)
-    hh = int(m.group(1))
-    mm = int(m.group(2))
-    if hh == 0:
-        return f"{mm:02d}m00s"
-    return f"{hh:02d}h{mm:02d}m"
+def _fmt_eta_modular(seconds: float) -> str:
+    return _fmt_duration_lettered(seconds)
 
 def _progress_bar(idx: int, total: int) -> str:
-    """
-    Build a fixed-width bar of BAR_TOTAL (includes the brackets).
-    Interior width = BAR_TOTAL - 2.
-    """
     total = max(1, int(total))
     idx = max(0, min(int(idx), total))
     inner = BAR_TOTAL - 2
@@ -524,92 +551,109 @@ def _progress_bar(idx: int, total: int) -> str:
     filled = max(0, min(filled, inner))
     return f"{BAR_LEFT}{BAR_FILL*filled}{BAR_EMPTY*(inner - filled)}{BAR_RIGHT}"
 
+def _fmt_s_per_file(sec: float | None) -> str | None:
+    if sec is None or sec <= 0:
+        return None
+    s = float(sec)
+    if s >= 60.0:
+        m = int(s // 60)
+        rem = int(round(s - m * 60))
+        if rem == 60:
+            m += 1
+            rem = 0
+        return f"{m}m{rem:02d}s/file"
+    txt = f"{s:.2f}".rstrip("0").rstrip(".")
+    return f"{txt}s/file"
+
+def _metrics_line_72_aligned(file_i: int, file_n: int, sec_per_file: float | None,
+                             eta_seconds: float | None, right_start_width: int) -> str:
+    i = max(0, int(file_i))
+    n = max(1, int(file_n))
+    i = min(i, n)
+
+    parts = [f"file {i}/{n}"]
+    sfile = _fmt_s_per_file(sec_per_file)
+    if sfile:
+        parts.append(sfile)
+    if eta_seconds is not None:
+        parts.append(f"{_fmt_eta_modular(float(eta_seconds))} eta")
+
+    payload = ("  ---  ").join(parts)
+    prefix = INDENT + (" " * right_start_width)
+
+    dash_len = max(0, CONTENT_WIDTH - len(prefix) - 2 - len(payload))
+    line = prefix + ("-" * dash_len) + "  " + payload
+    if len(line) < CONTENT_WIDTH:
+        line += " " * (CONTENT_WIDTH - len(line))
+    elif len(line) > CONTENT_WIDTH:
+        line = line[:CONTENT_WIDTH]
+    return line
+
+def _kv_line_72_at_col(label: str, value: str, right_start_width: int) -> str:
+    lbl = str(label)
+    if len(lbl) > right_start_width:
+        lbl = _truncate_center(lbl, right_start_width)
+    else:
+        lbl = lbl + (" " * (right_start_width - len(lbl)))
+
+    left = INDENT + lbl
+    v = str(value)
+
+    max_dashes = CONTENT_WIDTH - len(left) - 2 - len(v)
+    if max_dashes < 0:
+        v = _truncate_center(v, len(v) + max_dashes)
+        max_dashes = CONTENT_WIDTH - len(left) - 2 - len(v)
+
+    return left + ("-" * max_dashes) + "  " + v
+
+def _flex_left_value_line_72(free_left: str, right_value: str) -> str:
+    left = INDENT + free_left
+    v = str(right_value)
+    min_dashes = 4
+    base_len = len(left) + 2 + 2 + len(v)
+    dash_len = CONTENT_WIDTH - base_len
+    if dash_len < min_dashes:
+        max_left_total = CONTENT_WIDTH - (2 + 2 + len(v) + min_dashes)
+        max_free_left = max(0, max_left_total - len(INDENT))
+        free_left = _truncate_center(free_left, max_free_left)
+        left = INDENT + free_left
+        base_len = len(left) + 2 + 2 + len(v)
+        dash_len = max(min_dashes, CONTENT_WIDTH - base_len)
+    return left + "  " + ("-" * dash_len) + "  " + v
+
 # -------------------------
-# Back-compat helpers (for other sections)
+# Orientation & smoothing helpers (reused by reporting flows)
 # -------------------------
-_SPACER   = "   "
-_BASE_BAR = 50
-
-def _end_col(pad_to: int, max_val_width: int, base_bar: int = _BASE_BAR) -> int:
-    return CONTENT_WIDTH
-
-def _kv_line_aligned(label: str, value: str, pad_to: int, end_column: int) -> str:
-    return _kv_line_72(label, value, longest_label=pad_to)
-
-# -------------------------
-# Orientation & smoothing (robust)
-# -------------------------
-def calculate_orientation(pointA_x, pointA_y, pointB_x, pointB_y):
-    """
-    Compute orientation from A→B in degrees, normalized to [0, 360) with 0 = North.
-
-    Robustness:
-    - Local NumPy import (_np) so notebook-level 'np' shadowing can’t break it.
-    - Convert inputs to NumPy arrays to bypass pandas __array_ufunc__ dispatch.
-    - Preserve index if inputs are pandas Series.
-    """
-    import numpy as _np
-
-    idx = getattr(pointA_x, "index", None)
-
-    ax = _np.asarray(pointA_x, dtype=float)
-    ay = _np.asarray(pointA_y, dtype=float)
-    bx = _np.asarray(pointB_x, dtype=float)
-    by = _np.asarray(pointB_y, dtype=float)
-
-    dx = bx - ax
-    dy = ay - by  # invert y to set 0 = North
-
-    angle = _np.arctan2(dy, dx)
-    deg = _np.degrees(angle)
-    deg = (deg + 360) % 360
-    deg = (deg + 90) % 360  # shift so 0 corresponds to North
-    deg = _np.round(deg, 2)
-
-    if idx is not None and deg.shape == (len(idx),):
-        import pandas as _pd
-        return _pd.Series(deg, index=idx, name="Orientation")
-    return deg
-
 def calculate_center_running_average(df, cols, output_cols, window_size):
-    """
-    Centered running average over 'cols' into 'output_cols' with window_size.
-    """
     for col, out in zip(cols, output_cols):
         df[out] = df[col].rolling(window=(window_size + 1), center=True).mean()
     return df
 
 def hierarchical_classifier(df, columns):
-    """
-    Keep only the first positive flag per frame across the given columns.
-    """
     arr = df[columns].to_numpy(copy=True)
-    cumsum = np.cumsum(arr, axis=1)  # row-wise cumulative positives
-    arr[cumsum > 1] = 0              # zero out after the first positive
+    cumsum = np.cumsum(arr, axis=1)
+    arr[cumsum > 1] = 0
     df[columns] = arr
     return df
 
 # -------------------------
 # Header (Section 2)
 # -------------------------
-def report_header(experimental_root,
-                  pose_scoring: bool,
-                  total_found: int,
-                  to_score: int,
-                  skipped: int,
-                  already_scored: int,
-                  already_errors: int) -> str:
-    root = str(experimental_root)
-    pose_flag = "TRUE" if pose_scoring else "FALSE"
-
+def report_header(root: str, pose_flag: bool,
+                  total_found: int, to_score: int, skipped: int,
+                  already_scored: int, already_errors: int) -> str:
     out = []
-    out.append(_banner_75("SCORING STARTED"))
+    out.append("")
+    out.append(_banner_75("SCORING SESSION"))
+    out.append("")
+
+    out.append(_dash_value_line_72_from_start("FILES"))
     out.append("")
 
     labels_top = ["PROCESSING", "POSE SCORING"]
     L1 = max(len(s) for s in labels_top)
     out.append(_kv_line_72("PROCESSING", _truncate_center(root, 9999), L1))
-    out.append(_kv_line_72("POSE SCORING", pose_flag, L1))
+    out.append(_kv_line_72("POSE SCORING", str(pose_flag), L1))
     out.append("")
 
     labels_bot = ["FILES FOUND", "TO SCORE", "SKIPPING"]
@@ -624,48 +668,10 @@ def report_header(experimental_root,
     return "\n".join(out) + "\n\n"
 
 # -------------------------
-# Section 3 – Progress + Error lines
+# Errors mapping + “last:” snippet
 # -------------------------
-def report_scoring_line(idx: int,
-                        total_session: int,
-                        sec_per_file,
-                        eta) -> str:
-    """
-    Build the 72-col SCORING line:
-      '␣␣' + 'SCORING: {i}/{n} ' + [bar28] + ' ---- ' + payload
-    - If sec_per_file is None/0 or eta is None → payload is 'estimating…'
-    - Otherwise:
-        * sec_per_file printed as '{sec:.2f}s/file'
-        * eta can be a float seconds or a legacy 'HHhMM' string.
-          We render modular: '<1h → MMmSSs, ≥1h → HHhMMm'
-    """
-    w = len(str(max(1, total_session)))
-    left = f"{INDENT}SCORING: {idx:>{w}}/{total_session:{w}} "
-    bar = _progress_bar(idx, total_session)
-    mid = " - "
+# NOTE: Do not redefine CHECKPOINT_ERRORS here; use the authoritative mapping from CELL 02.
 
-    # Determine payload
-    payload = "estimating…"
-    if sec_per_file is not None and sec_per_file > 0 and eta is not None:
-        if isinstance(eta, (int, float)):
-            eta_str = _fmt_eta_modular(float(eta))
-        else:
-            eta_str = _fmt_eta_from_hhmm_str(str(eta))
-        payload = f"{float(sec_per_file):.2f}s/file | {eta_str} eta"
-
-    line = left + bar + mid + payload
-
-    # Enforce visible width = 72
-    if len(line) < CONTENT_WIDTH:
-        line = line + " " * (CONTENT_WIDTH - len(line))
-    else:
-        line = line[:CONTENT_WIDTH]
-
-    return line
-
-# ---- error line helpers (short labels + detail extraction) ----
-
-# Final short labels (exact strings you approved)
 _SUMMARY_LABELS = {
     "ERROR_READING_FILE":     "error reading file",
     "WRONG_STIMULUS_COUNT":   "wrong stim count",
@@ -678,8 +684,6 @@ _SUMMARY_LABELS = {
     "NO_EXPLORATION":         "low baseline exploration",
     "OUTPUT_LEN_SHORT":       "short output length",
 }
-
-# Render order (match your target order)
 _SUMMARY_ORDER = [
     "ERROR_READING_FILE",
     "WRONG_STIMULUS_COUNT",
@@ -694,85 +698,123 @@ _SUMMARY_ORDER = [
 ]
 
 def _label_for_summary(error_key: str) -> str:
-    # Falls back to CHECKPOINT_ERRORS long message if needed (must exist earlier in module)
-    return _SUMMARY_LABELS.get(error_key,
-                               CHECKPOINT_ERRORS[error_key]["message"].lower())
+    return _SUMMARY_LABELS.get(error_key, CHECKPOINT_ERRORS[error_key]["message"].lower())
 
-def _extract_detail_for_error(error_key: str, err_text: str) -> str:
-    """
-    err_text may be like: 'ERROR: Long message. (Detail text)'
-    We pull what's inside '(...)'. For NO_EXPLORATION we compact 'Walk 9% | > 20% allowed'
-    to '9% (> 20% allowed)'. For others, we keep the inside as-is.
-    """
-    start = err_text.find("(")
-    end = err_text.rfind(")")
-    inside = ""
-    if start != -1 and end != -1 and end > start:
-        inside = err_text[start + 1:end].strip()
+_LAST_ERROR_LABEL = "–"
+_LAST_ERROR_VALUE = ""
 
-    if error_key == "NO_EXPLORATION" and inside:
-        inside = inside.replace("Walk ", "")
-        inside = inside.replace("| >", "(>")
-        if not inside.endswith(")"):
-            inside += ")"
-    return inside
+def get_last_error_label() -> str:
+    if _LAST_ERROR_VALUE:
+        return f"{_LAST_ERROR_LABEL} {_LAST_ERROR_VALUE}"
+    return _LAST_ERROR_LABEL
 
+def _percent_from_text(txt: str) -> str | None:
+    m = re.search(r'(\d+(?:\.\d+)?)\s*%', txt)
+    if m:
+        val = float(m.group(1))
+        return f"{int(round(val))}%"
+    return None
+
+def _delta_from_two_numbers(txt: str) -> str | None:
+    nums = re.findall(r'[-+]?\d+(?:\.\d+)?', txt)
+    if len(nums) >= 2:
+        a = float(nums[0]); b = float(nums[1])
+        d = int(round(abs(b - a)))
+        return f"Δ{d}"
+    return None
+
+def _detail_snippet(error_key: str, err_text: str) -> tuple[str, str]:
+    short = _label_for_summary(error_key)
+    val = ""
+    if error_key == "WRONG_STIMULUS_COUNT":
+        d = _delta_from_two_numbers(err_text); val = f"({d})" if d else ""
+    elif error_key == "WRONG_STIMULUS_DURATION":
+        d = _delta_from_two_numbers(err_text); val = f"({d})" if d else ""
+    elif error_key == "LOST_CENTROID_POSITION":
+        p = _percent_from_text(err_text);      val = f"({p})" if p else ""
+    elif error_key == "POSE_MISMATCH":
+        d = _delta_from_two_numbers(err_text); val = f"({d})" if d else ""
+    elif error_key in ("VIEW_NAN_EXCEEDED", "UNASSIGNED_BEHAVIOR", "NO_EXPLORATION"):
+        p = _percent_from_text(err_text);      val = f"({p})" if p else ""
+    elif error_key == "OUTPUT_LEN_SHORT":
+        d = _delta_from_two_numbers(err_text); val = f"({d})" if d else ""
+    return short, val
+
+# Per-file error lines (tree-style). Suppressed when PRINT_TREE_ERRORS=False.
 def report_error_line(error_key: str, err_text: str) -> str:
-    """
-    Print the short-label error line as a 72-col KV row with tree prefix:
-      '␣␣└ ERROR: {short_label} {dash}  {value}'
-    """
-    short_label = _label_for_summary(error_key)
-    value = _extract_detail_for_error(error_key, err_text)
-    label = f"└ ERROR: {short_label}"
-    return _kv_line_72(label, value, longest_label=len(label))
+    global _LAST_ERROR_LABEL, _LAST_ERROR_VALUE
+    short, val = _detail_snippet(error_key, err_text)
+    _LAST_ERROR_LABEL = short
+    _LAST_ERROR_VALUE = val
+    if not PRINT_TREE_ERRORS:
+        return ""  # nothing to print (prevents blank lines when guarded by caller)
+    label = f"└ ERROR: {short}"
+    detail = err_text[err_text.find("(")+1:err_text.rfind(")")] if "(" in err_text and ")" in err_text else err_text
+    if error_key == "NO_EXPLORATION" and detail:
+        detail = detail.replace("Walk ", "").replace("| >", "(>")
+        if not detail.endswith(")"):
+            detail += ")"
+    return _kv_line_72(label, detail, longest_label=len(label))
 
 def report_error_filename(basename: str) -> str:
-    """Second tree line; ONLY line allowed to exceed 72 cols."""
-    return f"{INDENT}  └ {basename}\n"
+    if not PRINT_TREE_ERRORS:
+        return ""  # nothing to print
+    return f"{INDENT}  └ {basename}"  # no trailing \n (tqdm.write adds it)
 
 # -------------------------
-# Section 4 – Summary table
+# Summary table (strict 6-column layout)
 # -------------------------
-def _center_width(s: str, w: int = 9) -> str:
-    """Return s centered to width w (truncate if somehow longer)."""
+_COL1 = 2
+_COL2 = 8
+_COL3 = 33
+_COL4 = 13
+_COL5 = 3
+_COL6 = 13
+
+def _center_width(s: str, w: int = 11) -> str:
     s = str(s)
     if len(s) > w:
-        return s[:w]
+        s = s[:w]
     left = (w - len(s)) // 2
     right = w - len(s) - left
     return (" " * left) + s + (" " * right)
 
-def _errors_table_header(longest_left: int) -> str:
-    """'  ERRORS   ---|  SESSION  |---|  GLOBAL  |' aligned to width 72."""
-    left = INDENT + "ERRORS"
-    gap = (max(longest_left - len("ERRORS"), 0) + 2)
-    left += " " * gap
-    tail = "|" + _center_width("SESSION") + "|---|" + _center_width("GLOBAL") + "|"
-    dash_len = CONTENT_WIDTH - len(left) - 1 - len(tail)
-    return left + ("-" * max(dash_len, 0)) + " " + tail
+def _errors_table_header(_dash_col_ignored: int = 0) -> str:
+    col1 = INDENT
+    col2 = "ERRORS".ljust(_COL2)
+    col3 = ("-" * 31) + "  "
+    col4 = "|" + _center_width("SESSION") + "|"
+    col5 = "-" * _COL5
+    col6 = "|" + _center_width("GLOBAL") + "|"
+    return col1 + col2 + col3 + col4 + col5 + col6
 
-def _errors_total_row(longest_left: int, sess_total_str: str, glob_total_str: str) -> str:
-    """'  TOTAL    ---|  2 (15%)  |---| 30 (8%)  |' aligned to width 72."""
-    left = INDENT + "TOTAL"
-    gap = (max(longest_left - len("TOTAL"), 0) + 2)
-    left += " " * gap
-    tail = "|" + _center_width(sess_total_str) + "|---|" + _center_width(glob_total_str) + "|"
-    dash_len = CONTENT_WIDTH - len(left) - 1 - len(tail)
-    return left + ("-" * max(dash_len, 0)) + " " + tail
+def _errors_total_row(_dash_col_ignored: int, sess_total_str: str, glob_total_str: str) -> str:
+    col1 = INDENT
+    col2 = "TOTAL".ljust(_COL2)
+    col3 = ("-" * 31) + "  "
+    col4 = "|" + _center_width(sess_total_str) + "|"
+    col5 = "-" * _COL5
+    col6 = "|" + _center_width(glob_total_str) + "|"
+    return col1 + col2 + col3 + col4 + col5 + col6
 
-def _errors_detail_row(stub_label: str, longest_left: int, sess_cnt: int, glob_cnt: int) -> str:
-    """
-    '  -----    <label>---|   NNN   |---|   MMM   |' aligned to width 72.
-    The left text for alignment is the whole '-----    <label>' string.
-    """
-    left_text = "-----    " + stub_label
-    left = INDENT + left_text
-    gap = (max(longest_left - len(left_text), 0) + 2)
-    left += " " * gap
-    tail = "|" + _center_width(str(sess_cnt)) + "|---|" + _center_width(str(glob_cnt)) + "|"
-    dash_len = CONTENT_WIDTH - len(left) - 1 - len(tail)
-    return left + ("-" * max(dash_len, 0)) + " " + tail
+def _build_col3_detail(label: str) -> str:
+    base = str(label)
+    max_label = _COL3 - 2 - 2 - 1
+    if len(base) > max_label:
+        base = _truncate_center(base, max_label)
+    dash_len = _COL3 - len(base) - 2 - 2
+    if dash_len < 1:
+        dash_len = 1
+    return f"{base}  {'-'*dash_len}  "
+
+def _errors_detail_row(stub_label: str, _dash_col_ignored: int, sess_cnt: int, glob_cnt: int) -> str:
+    col1 = INDENT
+    col2 = "-----".ljust(_COL2)
+    col3 = _build_col3_detail(stub_label)
+    col4 = "|" + _center_width(str(sess_cnt)) + "|"
+    col5 = "-" * _COL5
+    col6 = "|" + _center_width(str(glob_cnt)) + "|"
+    return col1 + col2 + col3 + col4 + col5 + col6
 
 def _pct_int(numer: int, denom: int) -> int:
     if denom <= 0:
@@ -780,12 +822,6 @@ def _pct_int(numer: int, denom: int) -> int:
     return int(round(100 * numer / denom))
 
 def scan_global_stats(PATHconfig) -> dict:
-    """
-    Return global counts under the experiment root:
-      { "total": scored+pose+error (files already materialized),
-        "errors": error count,
-        "per_type": Counter({...}) }
-    """
     p_scored = Path(PATHconfig.pScored)
     p_pose   = Path(PATHconfig.pScoredPose)
     p_error  = Path(PATHconfig.pScoredError)
@@ -813,24 +849,12 @@ def report_final_summary_dual(*,
                               files_scored_session: int,
                               session_per_type: Counter,
                               global_stats: dict) -> str:
-    """
-    Build the Section 4 summary exactly as specified.
-
-    - FILES FOUND, FILES PROCESSED, FILES SCORED: KV rows (72 cols).
-    - Table header: ERRORS | SESSION |---| GLOBAL | with fixed numeric cells (w=9).
-    - TOTAL row shows 'N (P%)' for session (vs files_processed_session) and global
-      (vs files_found).
-    - Detail rows listed in _SUMMARY_ORDER; values taken from counters.
-
-    Returns the whole block including the 75-col banner and trailing blank lines.
-    """
-    out = []    
+    out = []
     out.append("")
     out.append("")
     out.append(_banner_75("SESSION SUMMARY"))
     out.append("")
 
-    # Top KV block
     labels = ["FILES FOUND", "FILES PROCESSED", "FILES SCORED"]
     L = max(len(s) for s in labels)
     out.append(_kv_line_72("FILES FOUND",      f"{files_found}",              L))
@@ -838,32 +862,117 @@ def report_final_summary_dual(*,
     out.append(_kv_line_72("FILES SCORED",     f"{files_scored_session}",     L))
     out.append("")
 
-    # Table header
-    detail_labels = ["-----    " + _label_for_summary(k) for k in _SUMMARY_ORDER]
-    longest_left = max(len("ERRORS"), len("TOTAL"), *(len(s) for s in detail_labels))
-    out.append(_errors_table_header(longest_left))
+    out.append(_errors_table_header(0))
 
-    # Totals
     session_errors = sum(session_per_type.values())
     s_pct = _pct_int(session_errors, files_processed_session)
     g_errors = global_stats.get("errors", 0)
-    g_pct = _pct_int(g_errors, files_found)  # global % vs total tracked in folder
+    g_total  = files_found
+    g_pct = _pct_int(g_errors, g_total)
+    out.append(_errors_total_row(0, f"{session_errors} ({s_pct}%)", f"{g_errors} ({g_pct}%)"))
 
-    out.append(_errors_total_row(longest_left,
-                                 f"{session_errors} ({s_pct}%)",
-                                 f"{g_errors} ({g_pct}%)"))
-
-    # Detail rows in fixed order
     global_per = global_stats.get("per_type", Counter())
     for key in _SUMMARY_ORDER:
         label = _label_for_summary(key)
         s_cnt = session_per_type.get(key, 0)
         g_cnt = global_per.get(key, 0)
-        out.append(_errors_detail_row(label, longest_left, s_cnt, g_cnt))
+        out.append(_errors_detail_row(label, 0, s_cnt, g_cnt))
 
-    # Trailing spacing; duck printed by caller
     return "\n".join(out)
 
+# -------------------------
+# Pinned scoring display
+# -------------------------
+class PinnedScoringDisplay:
+    """
+    Updates in place via IPython display:
+      1) "  SCORING  [#####........]"
+      2) "            --------------  file i/n  ---  XXs/file  ---  MMmSSs eta"
+      3) "  SCORED   ----------------------------------------------  X"
+      4) "  ERROR    last: <label> (value)  ------------------------  Y"  (only if Y>0)
+    """
+    def __init__(self, total_session: int):
+        self.total = int(max(0, total_session))
+        self.ok = 0
+        self.err = 0
+        self.last_snippet = "–"
+        self._right_start_width = len("SCORING  ")
+        self._can_display = False
+        try:
+            from IPython.display import display, Markdown
+            self._Markdown = Markdown
+            l1 = self._build_bar_line(done=0)
+            l2 = _metrics_line_72_aligned(0, self.total, None, None, self._right_start_width)
+            lines = [l1, l2, "", self._kv_line_scored(), self._maybe_line_error()]
+            lines = [ln for ln in lines if ln != ""]
+            self._handle = display(Markdown("```text\n" + "\n".join(lines) + "\n```"), display_id=True)
+            self._can_display = True
+        except Exception:
+            self._handle = None
 
-# Keep the done duck. It celebrates the end of a run.
-def done_duck(i=24): return f"""\n\n\n\n{' '*(i+9)}__(·)<    ,\n{' '*(i+6)}O  \\_) )   c|_|\n{' '*i}{'~'*27}"""
+    def _build_bar_line(self, done: int) -> str:
+        label = f"{INDENT}SCORING  "
+        bar_width = CONTENT_WIDTH - len(label)
+        inner = max(0, bar_width - 2)
+        frac = (done / self.total) if self.total > 0 else 0.0
+        filled = int(round(max(0.0, min(1.0, frac)) * inner))
+        line = label + "[" + ("#" * filled) + ("." * (inner - filled)) + "]"
+        if len(line) < CONTENT_WIDTH:
+            line += " " * (CONTENT_WIDTH - len(line))
+        elif len(line) > CONTENT_WIDTH:
+            line = line[:CONTENT_WIDTH]
+        return line
+
+    def _kv_line_scored(self) -> str:
+        return _kv_line_72_at_col("SCORED", f"{self.ok}", self._right_start_width)
+
+    def _maybe_line_error(self) -> str:
+        if self.err <= 0:
+            return ""
+        snippet = f"ERROR    last: {self.last_snippet}"
+        return _flex_left_value_line_72(snippet, f"{self.err}")
+
+    def _render(self, done, ema_seconds, eta_seconds):
+        if not self._can_display or self._handle is None:
+            return
+        l1 = self._build_bar_line(done)
+        l2 = _metrics_line_72_aligned(done, self.total, ema_seconds, eta_seconds, self._right_start_width)
+        lines = [l1, l2, "", self._kv_line_scored(), self._maybe_line_error()]
+        lines = [ln for ln in lines if ln != ""]
+        self._handle.update(self._Markdown("```text\n" + "\n".join(lines) + "\n```"))
+
+    # Accept positional or keyword styles from Main
+    def update_success(self, done=None, ema_seconds=None, eta_seconds=None, **kwargs):
+        if done is None:
+            done = kwargs.get("done_count", kwargs.get("done", 0))
+        if ema_seconds is None:
+            ema_seconds = kwargs.get("ema_seconds", kwargs.get("ema", None))
+        if eta_seconds is None:
+            eta_seconds = kwargs.get("eta_seconds", kwargs.get("eta", None))
+        self.ok += 1
+        self._render(int(done or 0), ema_seconds, eta_seconds)
+
+    def update_error(self, done=None, last_snippet=None, ema_seconds=None, eta_seconds=None, **kwargs):
+        if done is None:
+            done = kwargs.get("done_count", kwargs.get("done", 0))
+        if last_snippet is None:
+            last_snippet = (
+                kwargs.get("last_label",
+                kwargs.get("last_snippet",
+                kwargs.get("last",
+                kwargs.get("snippet", None))))
+            )
+        if ema_seconds is None:
+            ema_seconds = kwargs.get("ema_seconds", kwargs.get("ema", None))
+        if eta_seconds is None:
+            eta_seconds = kwargs.get("eta_seconds", kwargs.get("eta", None))
+        self.err += 1
+        if last_snippet:
+            self.last_snippet = last_snippet
+        self._render(int(done or 0), ema_seconds, eta_seconds)
+
+    def last_error(self, short_label: str, value_parenthesized: str):
+        self.last_snippet = short_label + (f" {value_parenthesized}" if value_parenthesized else "")
+
+    def close(self):
+        return
