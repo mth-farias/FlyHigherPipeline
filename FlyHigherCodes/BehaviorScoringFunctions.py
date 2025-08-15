@@ -167,7 +167,7 @@ def clean_ones(df, column, min_length):
     # Loop through the array and clean isolated ones based on min_length criteria
     for i in range(n - min_length - 1):
         if x[i] == 0 and x[i + 1] == 1:
-            if x[i + 1: i + 1 + min_length + 1].sum() < 3:
+            if x[i + 1: i + 1 + min_length + 1].sum() < min_length:
                 x[i + 1] = 0
     df[column] = x
 
