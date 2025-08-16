@@ -1,0 +1,331 @@
+{
+    "$id": "h...",
+    "$schema": "https://json-schema.org/draft-07/schema",
+    "definitions": {
+        "point": {
+            "properties": {
+                "x": {
+                    "default": 0,
+                    "type": "number"
+                },
+                "y": {
+                    "default": 0,
+                    "type": "number"
+                }
+            },
+            "type": "object"
+        },
+        "animationSettings": {
+            "properties": {
+                "duration": {
+                    "default": 2,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "initialRadius": {
+                    "default": 0.5,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "initialVirtualDistance": {
+                    "default": 12.5,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "linearApproachingVelocity": {
+                    "default": 25,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "maxRadius": {
+                    "default": 25,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "monitorDistance": {
+                    "default": 25,
+                    "minimum": 0,
+                    "type": "number"
+                }
+            },
+            "type": "object"
+        },
+        "color": {
+            "properties": {
+                "a": {
+                    "default": 1,
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "b": {
+                    "default": 0,
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "g": {
+                    "default": 0,
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "r": {
+                    "default": 0,
+                    "maximum": 1,
+                    "minimum": 0,
+                    "type": "number"
+                }
+            },
+            "type": "object"
+        },
+        "controlNoisyStimuli": {
+            "default": null,
+            "properties": {
+                "animationSettings": {
+                    "$ref": "#/definitions/animationSettings"
+                },
+                "backgroundColor": {
+                    "$ref": "#/definitions/color"
+                },
+                "delayOffset": {
+                    "$ref": "#/definitions/delayOffset"
+                },
+                "delayOnset": {
+                    "$ref": "#/definitions/delayOnset"
+                },
+                "diameter": {
+                    "default": 0.1,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "offColor": {
+                    "$ref": "#/definitions/color"
+                },
+                "onColor": {
+                    "$ref": "#/definitions/color"
+                }
+            },
+            "type": [
+                "object",
+                "null"
+            ]
+        },
+        "delayOffset": {
+            "default": 0,
+            "description": "Delays the offset of stimulus (seconds)",
+            "minimum": 0,
+            "type": "number"
+        },
+        "delayOnset": {
+            "default": 0,
+            "description": "Delays the onset of stimulus (seconds)",
+            "minimum": 0,
+            "type": "number"
+        },
+        "loomingCircleStimuli": {
+            "default": null,
+            "properties": {
+                "animationSettings": {
+                    "$ref": "#/definitions/animationSettings"
+                },
+                "backgroundColor": {
+                    "$ref": "#/definitions/color"
+                },
+                "color": {
+                    "$ref": "#/definitions/color"
+                },
+                "delayOffset": {
+                    "$ref": "#/definitions/delayOffset"
+                },
+                "delayOnset": {
+                    "$ref": "#/definitions/delayOnset"
+                }
+            },
+            "type": [
+                "object",
+                "null"
+            ]
+        },
+        "loomingImageStimuli": {
+            "default": null,
+            "properties": {
+                "animationSettings": {
+                    "$ref": "#/definitions/animationSettings"
+                },
+                "backgroundColor": {
+                    "$ref": "#/definitions/color"
+                },
+                "delayOffset": {
+                    "$ref": "#/definitions/delayOffset"
+                },
+                "delayOnset": {
+                    "$ref": "#/definitions/delayOnset"
+                },
+                "scaleX": {
+                    "default": 1,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "scaleY": {
+                    "default": 1,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "textureName": {
+                    "default": "",
+                    "type": "string"
+                }
+            },
+            "type": [
+                "object",
+                "null"
+            ]
+        },
+        "movingCircleStimuli": {
+            "default": null,
+            "properties": {
+                "startPosition": {
+                    "$ref": "#/definitions/point"
+                },
+                "endPosition": {
+                    "$ref": "#/definitions/point"
+                },
+                "backgroundColor": {
+                    "$ref": "#/definitions/color"
+                },
+                "color": {
+                    "$ref": "#/definitions/color"
+                },
+                "delayOffset": {
+                    "$ref": "#/definitions/delayOffset"
+                },
+                "delayOnset": {
+                    "$ref": "#/definitions/delayOnset"
+                },
+                "radius": {
+                    "default": 1,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "duration": {
+                    "default": 1,
+                    "minimum": 0,
+                    "type": "number"
+                }
+            },
+            "type": [
+                "object",
+                "null"
+            ]
+        },
+        "optogeneticsContinuousStimuli": {
+            "default": null,
+            "properties": {
+                "amplitude": {
+                    "default": 1,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "duration": {
+                    "default": 1,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "delayOnset": {
+                    "$ref": "#/definitions/delayOnset"
+                },
+                "ledTarget": {
+                    "default": "None",
+                    "enum": [
+                        "None",
+                        "Led0",
+                        "Led1",
+                        "Both"
+                    ],
+                    "type": "string"
+                }
+            },
+            "type": [
+                "object",
+                "null"
+            ]
+        },
+        "optogeneticsPulsedStimuli": {
+            "default": null,
+            "properties": {
+                "amplitude": {
+                    "default": 1,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "duration": {
+                    "default": 1,
+                    "minimum": 0,
+                    "type": "number"
+                },
+                "dutyCycle": {
+                    "default": 50,
+                    "maximum": 100,
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "frequency": {
+                    "default": 10,
+                    "minimum": 1,
+                    "type": "number"
+                },
+                "delayOnset": {
+                    "$ref": "#/definitions/delayOnset"
+                },
+                "ledTarget": {
+                    "default": "None",
+                    "enum": [
+                        "None",
+                        "Led0",
+                        "Led1",
+                        "Both"
+                    ],
+                    "type": "string"
+                }
+            },
+            "type": [
+                "object",
+                "null"
+            ]
+        },
+        "trialSettings": {
+            "properties": {
+                "controlNoisyStimuli": {
+                    "$ref": "#/definitions/controlNoisyStimuli"
+                },
+                "loomingCircleStimuli": {
+                    "$ref": "#/definitions/loomingCircleStimuli"
+                },
+                "loomingImageStimuli": {
+                    "$ref": "#/definitions/loomingImageStimuli"
+                },
+                "optogeneticsContinuousStimuli": {
+                    "$ref": "#/definitions/optogeneticsContinuousStimuli"
+                },                
+                "optogeneticsPulsedStimuli": {
+                    "$ref": "#/definitions/optogeneticsContinuousStimuli"
+                },
+                "movingCircleStimuli": {
+                    "$ref": "#/definitions/movingCircleStimuli"
+                }
+            },
+            "type": "object"
+        }
+    },
+    "properties": {
+        "trials": {
+            "items": {
+                "$ref": "#/definitions/trialSettings"
+            },
+            "type": "array"
+        }
+    },
+    "title": "BonFlyStimuli",
+    "type": "object"
+}

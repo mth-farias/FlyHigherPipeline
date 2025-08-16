@@ -1,0 +1,34 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<WorkflowBuilder Version="2.8.0-alpha015"
+                 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                 xmlns:gl="clr-namespace:Bonsai.Shaders;assembly=Bonsai.Shaders"
+                 xmlns:res="clr-namespace:Bonsai.Resources;assembly=Bonsai.System"
+                 xmlns="https://bonsai-rx.org/2018/workflow">
+  <Workflow>
+    <Nodes>
+      <Expression xsi:type="WorkflowInput">
+        <Name>Source1</Name>
+      </Expression>
+      <Expression xsi:type="Combinator">
+        <Combinator xsi:type="gl:ShaderResources">
+          <gl:Shaders>
+            <gl:ShaderConfiguration xsi:type="gl:Material">
+              <gl:Name>RandomNoiseCircle</gl:Name>
+              <gl:RenderState />
+              <gl:ShaderUniforms />
+              <gl:BufferBindings />
+              <gl:FramebufferAttachments />
+              <gl:VertexShader>BonVision:Shaders.Quad.vert</gl:VertexShader>
+              <gl:FragmentShader>Shaders\RandomNoiseContrast.frag</gl:FragmentShader>
+            </gl:ShaderConfiguration>
+          </gl:Shaders>
+        </Combinator>
+      </Expression>
+      <Expression xsi:type="WorkflowOutput" />
+    </Nodes>
+    <Edges>
+      <Edge From="0" To="1" Label="Source1" />
+      <Edge From="1" To="2" Label="Source1" />
+    </Edges>
+  </Workflow>
+</WorkflowBuilder>

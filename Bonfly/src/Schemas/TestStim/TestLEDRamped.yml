@@ -1,0 +1,11 @@
+%YAML 1.1
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/neurogears/BonFly/main/src/Schemas/StimuliSpecification.json
+# nsdjkandjsadaksdjas this is a great yaml file
+trials:
+  [
+    &optoTrial {optogeneticsRampedStimuli: {amplitude: 10, durationSteady: 2, durationRamp: 1, delayOnset: 2, ledTarget: Led0}},    
+    &optoTrial {optogeneticsRampedStimuli: {amplitude: 3, durationSteady: 2, durationRamp: 1, delayOnset: 5, ledTarget: Led1}},
+    &optoTrial {optogeneticsRampedStimuli: {amplitude: 10, durationSteady: 2, durationRamp: 1, delayOnset: 5, ledTarget: Led0}},    
+    &optoTrial {optogeneticsRampedStimuli: {amplitude: 3, durationSteady: 2, durationRamp: 1, delayOnset: 5, ledTarget: Led1}},
+  ]

@@ -1,0 +1,58 @@
+%YAML 1.1
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/neurogears/BonFly/main/src/Schemas/StimuliSpecification.json
+
+trials:
+  [
+    {loomingCircleStimuli: &loomingCircleTrial {
+          animationSettings: &animationTrial
+            {
+              duration: 0.5,
+              initialRadius: 1,
+              initialVirtualDistance: 12.5,
+              linearApproachingVelocity: 25,
+              maxRadius: 25,
+              monitorDistance: 19,
+            },
+          delayOffset: 0,
+          delayOnset: 2,
+          backgroundColor: { a: 0, b: 0, g: 0, r: 0 },
+          color: { a: 1, b: 0, g: 0, r: 0 },
+        }
+    },    
+    {loomingCircleStimuli: { <<: *loomingCircleTrial, delayOnset: 1}},
+    {loomingCircleStimuli: { <<: *loomingCircleTrial, delayOnset: 1}},
+
+    {controlNoisyStimuli: &controlTrial {
+          animationSettings: &animationTrial
+            {
+              duration: 0.5,
+              initialRadius: 1,
+              initialVirtualDistance: 12.5,
+              linearApproachingVelocity: 25,
+              maxRadius: 25,
+              monitorDistance: 19,
+            },
+          delayOffset: 0,
+          delayOnset: 1,
+          backgroundColor: { a: 0, b: 0, g: 0, r: 0 },
+          diameter: 25,
+          offColor: { a: 0, b: 0, g: 0, r: 0 },
+          onColor: { a: 1, b: 0, g: 0, r: 0 },
+        }
+    },
+    {controlNoisyStimuli: { <<: *controlTrial, delayOnset: 1}},
+
+    {movingCircleStimuli: &movingCircleStimuli {
+        startPosition: {x: 0, y: -15}, 
+        endPosition: {x: 0, y: 15},           
+        delayOffset: 0,
+        delayOnset: 1,
+        backgroundColor: { a: 0, b: 0, g: 0, r: 0 },
+        color: { a: 1, b: 0, g: 0, r: 0 },
+        radius: 13.5,
+        duration: 0.5
+      }
+    },
+    {movingCircleStimuli: { <<: *movingCircleStimuli, delayOnset: 1}},
+  ]

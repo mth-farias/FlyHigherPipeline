@@ -1,0 +1,42 @@
+%YAML 1.1
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/neurogears/BonFly/main/src/Schemas/StimuliSpecification.json
+# nsdjkandjsadaksdjas this is a great yaml file
+trials:
+  [
+    &optoTrial { #Continuous
+      optogeneticsContinuousStimuli: {
+        amplitude: 3,      #LED intensity (a.u. 0-120) UNIQUE TO EACH SETUP
+        duration: 2,       #in sec
+        delayOnset: 15,    #in sec, since last stim offset
+        ledTarget: Led1    #which of the RGB LED to use
+        }
+    }, 
+    &optoTrial {
+      optogeneticsContinuousStimuli: {amplitude: 3, duration: 2, delayOnset: 5, ledTarget: Led0}
+    },      
+    &optoTrial { #Pulsed
+      optogeneticsPulsedStimuli: {
+        amplitude: 3,      #LED intensity (a.u. 0-120) UNIQUE TO EACH SETUP
+        duration: 3,       #in sec
+        frequency: 2,      #Hz - number of pulses per second 
+        dutyCycle: 50,     #% of time the light is on
+        delayOnset: 10,    #in sec, since last stim offset
+        ledTarget: Led1    #which of the RGB LED to use
+        }
+    },
+    &optoTrial {
+      optogeneticsPulsedStimuli: {amplitude: 3, duration: 3, frequency: 2, dutyCycle: 50, delayOnset: 10, ledTarget: Led0}
+    },
+    &optoTrial { #Ramped
+      optogeneticsRampedStimuli: {
+        amplitude: 8,      #LED intensity (a.u. 0-120) UNIQUE TO EACH SETUP
+        durationSteady: 3, #in sec, no amplitude change
+        durationRamp: 1,   #in sec, up and down
+        delayOnset: 5,     #in sec, since last stim offset
+        ledTarget: Led1}   #which of the RGB LED to use
+    },    
+    &optoTrial {
+      optogeneticsRampedStimuli: {amplitude: 8, durationSteady: 3, durationRamp: 5, delayOnset: 5, ledTarget: Led0}
+    }
+  ]

@@ -1,0 +1,14 @@
+%YAML 1.1
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/neurogears/BonFly/main/src/Schemas/StimuliSpecification.json
+
+trials:
+  [
+    &optoTrial {optogeneticsPulsedStimuli: {amplitude: 5, duration: 0.5, dutyCycle: 50, frequency: 15, delayOnset: 2, ledTarget: Led0}},
+    &optoTrial {optogeneticsPulsedStimuli: {amplitude: 1, duration: 0.5, dutyCycle: 50, frequency: 15, delayOnset: 1, ledTarget: Led1}},
+    &optoTrial {optogeneticsPulsedStimuli: {amplitude: 5, duration: 0.5, dutyCycle: 50, frequency: 15, delayOnset: 1, ledTarget: Led0}},
+    &optoTrial {optogeneticsPulsedStimuli: {amplitude: 1, duration: 0.5, dutyCycle: 50, frequency: 15, delayOnset: 1, ledTarget: Led1}},
+    &optoTrial {optogeneticsPulsedStimuli: {amplitude: 5, duration: 0.5, dutyCycle: 50, frequency: 15, delayOnset: 1, ledTarget: Led0}},
+    &optoTrial {optogeneticsPulsedStimuli: {amplitude: 1, duration: 0.5, dutyCycle: 50, frequency: 15, delayOnset: 1, ledTarget: Led1}},
+    
+  ]

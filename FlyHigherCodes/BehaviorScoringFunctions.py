@@ -646,8 +646,6 @@ def report_header(root: str, pose_flag: bool,
     out.append("")
     out.append(_banner_75("SCORING SESSION"))
     out.append("")
-
-    out.append(_dash_value_line_72_from_start("FILES"))
     out.append("")
 
     labels_top = ["PROCESSING", "POSE SCORING"]
